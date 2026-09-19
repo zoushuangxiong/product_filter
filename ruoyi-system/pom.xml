@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+    <parent>
+        <artifactId>ruoyi</artifactId>
+        <groupId>com.ruoyi</groupId>
+        <version>3.9.2</version>
+    </parent>
+    <modelVersion>4.0.0</modelVersion>
+
+    <artifactId>ruoyi-system</artifactId>
+
+    <description>
+        system系统模块
+    </description>
+
+    <dependencies>
+        <!-- jsoup：解析淘宝/1688 商品详情 HTML，提取详情图地址 -->
+        <dependency>
+            <groupId>org.jsoup</groupId>
+            <artifactId>jsoup</artifactId>
+            <version>1.23.2</version>
+        </dependency>
+
+        <!-- ONNX Runtime：在 Java 进程中执行 OCR 模型，无需 Python 服务 -->
+        <dependency>
+            <groupId>com.microsoft.onnxruntime</groupId><artifactId>onnxruntime</artifactId><version>1.20.0</version>
+        </dependency>
+        <!-- OpenCV：图片解码、缩放、文字框定位和裁切；依赖包含原生运行库 -->
+        <dependency>
+            <groupId>org.openpnp</groupId><artifactId>opencv</artifactId><version>4.9.0-0</version>
+        </dependency>
+        <!-- JTS：向外扩展检测到的文字多边形，避免裁切时截断字符 -->
+        <dependency>
+            <groupId>org.locationtech.jts</groupId><artifactId>jts-core</artifactId><version>1.20.0</version>
+        </dependency>
+
+        <!-- 通用工具-->
+        <dependency>
+            <groupId>com.ruoyi</groupId>
+            <artifactId>ruoyi-common</artifactId>
+        </dependency>
+
+    </dependencies>
+
+</project>
