@@ -6,6 +6,8 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -25,6 +27,7 @@ import org.springframework.stereotype.Service;
 import com.alibaba.fastjson2.JSON;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.system.utils.taobao.TaobaoFetchException;
+import com.ruoyi.system.utils.taobao.TaobaoProductInfo;
 import static com.ruoyi.system.service.product.ScanModels.*;
 
 /** 单实例任务队列。快照原子写入私有目录，重启不自动重复付费请求。 */
@@ -32,8 +35,15 @@ import static com.ruoyi.system.service.product.ScanModels.*;
 public class ProductScanService
 {
     private final Map<String, Job> jobs = new ConcurrentHashMap<>();
+    // 保存成功后发布不可变摘要；列表不获取任务锁，不等待大快照写盘。
+    private final Map<String, TaskSummary> history = new ConcurrentHashMap<>();
     private final Path storage;
     private final ScanGateway gateway;
+    private final Path usageFile;
+    private final int dailyLimit;
+    private final Object usageLock = new Object();
+    private LocalDate usageDate;
+    private int usageCount;
     // 最多同时处理 2 个任务，另排队 20 个；单用户最多有 1 个进行中的任务。
     private final ThreadPoolExecutor executor = new ThreadPoolExecutor(2, 2, 0, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(20), runnable -> {
@@ -41,18 +51,21 @@ public class ProductScanService
             });
 
     public ProductScanService(@Value("${product.scan.storage:${user.home}/.product-filter/scans}") String storage,
-            @Value("${onebound.key:}") String key, @Value("${onebound.secret:}") String secret)
+            @Value("${onebound.key:}") String key, @Value("${onebound.secret:}") String secret, @Value("${product.scan.daily-limit:20000}") int dailyLimit)
     {
         this.storage = Path.of(storage).toAbsolutePath();
         this.gateway = new ScanGateway(key, secret);
+        this.dailyLimit = dailyLimit > 0 ? dailyLimit : 20000;
+        this.usageFile = this.storage.resolve("daily-usage.json");
         try
         {
             Files.createDirectories(this.storage.resolve("assets"));
+            loadUsage();
             try { Files.setPosixFilePermissions(this.storage, java.nio.file.attribute.PosixFilePermissions.fromString("rwx------")); }
             catch (UnsupportedOperationException ignored) { }
             try (var files = Files.list(this.storage))
             {
-                for (Path file : files.filter(p -> p.getFileName().toString().endsWith(".json")).toList())
+                for (Path file : files.filter(p -> p.getFileName().toString().endsWith(".json") && !p.equals(usageFile)).toList())
                 {
                     Job job = JSON.parseObject(Files.readString(file), Job.class);
                     if (job == null || job.id == null || !file.getFileName().toString().equals(job.id + ".json"))
@@ -65,11 +78,90 @@ public class ProductScanService
                         save(job);
                     }
                     if (repairDetailWarnings(job)) save(job);
+                    history.put(job.id, summary(job));
                     jobs.put(job.id, job);
                 }
             }
         }
         catch (Exception e) { throw new IllegalStateException("无法读取商品任务目录，请检查目录权限或快照文件", e); }
+    }
+
+    private void loadUsage()
+    {
+        synchronized (usageLock)
+        {
+            usageDate = LocalDate.now(ZoneId.of("Asia/Shanghai")); usageCount = 0;
+            try
+            {
+                if (Files.exists(usageFile))
+                {
+                    var usage = JSON.parseObject(Files.readString(usageFile));
+                    LocalDate saved = LocalDate.parse(usage.getString("date"));
+                    if (saved.equals(usageDate)) usageCount = Math.max(0, usage.getIntValue("count"));
+                }
+            }
+            catch (Exception e) { throw new IllegalStateException("无法读取每日调用计数，请检查 daily-usage.json", e); }
+        }
+    }
+
+    /** 只有第三方成功返回商品信息后计数一次；失败、超时和参数错误不计。 */
+    private void recordProviderSuccess()
+    {
+        synchronized (usageLock)
+        {
+            LocalDate today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
+            if (!today.equals(usageDate)) { usageDate = today; usageCount = 0; }
+            usageCount++;
+            try
+            {
+                Path temp = storage.resolve("daily-usage.tmp");
+                Files.writeString(temp, JSON.toJSONString(Map.of("date", usageDate.toString(), "count", usageCount)));
+                Files.move(temp, usageFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+            }
+            catch (Exception e) { throw new IllegalStateException("每日调用计数保存失败，请检查任务目录权限", e); }
+        }
+    }
+
+    public Map<String, Object> usage()
+    {
+        synchronized (usageLock)
+        {
+            LocalDate today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
+            if (!today.equals(usageDate)) { usageDate = today; usageCount = 0; }
+            return Map.of("date", usageDate.toString(), "used", usageCount, "limit", dailyLimit);
+        }
+    }
+
+    private static double threshold(Job job)
+    {
+        double value = job.rules == null ? 0.6 : job.rules.confidenceThreshold;
+        return value == 0.4 || value == 0.5 || value == 0.6 ? value : 0.6;
+    }
+
+    /** 临时网络错误最多再试两次；明确的商品或权限错误立即结束。 */
+    private TaobaoProductInfo fetchWithRetry(Product product)
+    {
+        TaobaoFetchException last = null;
+        for (int attempt = 0; attempt <= 2; attempt++)
+        {
+            try { return gateway.fetch(product.itemId, product.platform); }
+            catch (TaobaoFetchException e)
+            {
+                last = e;
+                if (!Set.of(TaobaoFetchException.Code.TIMEOUT, TaobaoFetchException.Code.NETWORK_ERROR,
+                        TaobaoFetchException.Code.HTTP_ERROR, TaobaoFetchException.Code.PROVIDER_ERROR,
+                        TaobaoFetchException.Code.RATE_LIMITED).contains(e.getCode()) || attempt == 2) throw e;
+                try { Thread.sleep(800L * (attempt + 1)); }
+                catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw e; }
+            }
+        }
+        throw last;
+    }
+
+    private static void validateThreshold(double value)
+    {
+        if (value != 0.4 && value != 0.5 && value != 0.6)
+            throw new ServiceException("低置信度阈值只能选择 60%、50% 或 40%");
     }
 
     /** 修正旧版缺少详情图及重复 URL 规则；不重新抓取，不清除其他未完成原因。 */
@@ -84,12 +176,12 @@ public class ProductScanService
             boolean complete = "DONE".equals(p.state) && p.error == null
                     && p.pictures.stream().anyMatch(pic -> "MAIN".equals(pic.kind))
                     && p.pictures.stream().allMatch(pic -> "DONE".equals(pic.state) && pic.error == null
-                        && pic.ocr != null && pic.ocr.lines.stream().noneMatch(line -> line.score < 0.6))
+                        && pic.ocr != null && pic.ocr.lines.stream().noneMatch(line -> line.score < threshold(job)))
                     && p.warnings.stream().allMatch(w -> w.equals("检测范围为接口实际返回内容；未命中词库不代表平台合规或上游图片完整"));
             if (complete)
             {
                 p.incomplete = false;
-                p.verdict = !p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty())
+                p.verdict = !p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0)
                         ? "MATCHED" : "CLEAR";
             }
             changed = true;
@@ -103,8 +195,9 @@ public class ProductScanService
         if (request == null || request.items == null || request.items.isEmpty() || request.items.size() > 10_000)
             throw new ServiceException("每次请导入 1 至 10,000 条商品记录（不含表头）");
         Request rules = JSON.parseObject(JSON.toJSONString(request), Request.class);
-        if (ScanRules.words(rules.titleWords).isEmpty() || (ScanRules.words(rules.imageWords).isEmpty() && !rules.detectPhones))
-            throw new ServiceException("请填写标题过滤词，并填写图片过滤词或开启手机号检测");
+        validateThreshold(rules.confidenceThreshold);
+        if (ScanRules.words(rules.titleWords).isEmpty() || (ScanRules.words(rules.imageWords).isEmpty() && !rules.detectPhones && !rules.detectQrCodes))
+            throw new ServiceException("请填写标题过滤词，并填写图片过滤词、手机号检测或二维码检测");
         if (!Set.of("taobao", "1688").contains(rules.platform == null ? "" : rules.platform))
             throw new ServiceException("请先选择商品平台：淘宝/天猫或1688");
         Set<String> ids = new LinkedHashSet<>();
@@ -137,11 +230,55 @@ public class ProductScanService
         }
     }
 
-    public List<Job> list(long owner)
+    /** 修改已完成任务的置信度阈值并重新计算低置信度状态，不重新调用商品接口。 */
+    public Job updateThreshold(long owner, String id, double value)
+    {
+        validateThreshold(value);
+        Job job = owned(owner, id);
+        synchronized (job)
+        {
+            if (active(job)) throw new ServiceException("请在任务结束后调整置信度阈值");
+            job.rules.confidenceThreshold = value;
+            for (Product p : job.products)
+            {
+                if (!"DONE".equals(p.state)) continue;
+                boolean pictureProblem = p.error != null || p.pictures.stream().anyMatch(pic ->
+                        !"DONE".equals(pic.state) || pic.error != null || pic.ocr == null);
+                boolean low = p.pictures.stream().anyMatch(pic -> pic.ocr != null && pic.ocr.lines.stream().anyMatch(line -> line.score < value));
+                boolean other = p.warnings.stream().anyMatch(w -> !w.equals("检测范围为接口实际返回内容；未命中词库不代表平台合规或上游图片完整") && !w.contains("有低置信度文字"));
+                p.incomplete = pictureProblem || low || other;
+                p.warnings.removeIf(w -> w.contains("有低置信度文字"));
+                if (low) p.warnings.add("有低置信度文字，请人工核查");
+                p.verdict = !p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0) ? "MATCHED" : p.incomplete ? "REVIEW" : "CLEAR";
+            }
+            save(job);
+            return copy(job);
+        }
+    }
+
+    /** 历史列表读取最近保存的摘要，不复制 OCR 数据，也不等待任务处理锁。 */
+    public List<TaskSummary> list(long owner)
     {
         return jobs.values().stream().filter(job -> job.ownerId == owner)
-                .sorted(Comparator.comparing((Job j) -> j.createdAt).reversed()).limit(50)
-                .map(job -> { synchronized (job) { return copy(job); } }).toList();
+                .map(job -> history.get(job.id)).filter(summary -> summary != null)
+                .sorted(Comparator.comparing(TaskSummary::createdAt).reversed()).limit(50).toList();
+    }
+
+    /** 返回当前账号历史上已成功获取商品信息的 ID，供导入前过滤重复检测。 */
+    public Set<String> checkedIds(long owner, String platform)
+    {
+        if (!Set.of("taobao", "1688").contains(platform)) throw new ServiceException("请先选择商品平台：淘宝/天猫或1688");
+        Set<String> ids = new java.util.HashSet<>();
+        for (Job job : jobs.values()) if (job.ownerId == owner && job.rules != null && platform.equals(job.rules.platform))
+            synchronized (job) { for (Product p : job.products) if (p.providerFetched || (p.title != null && !p.title.isBlank())) ids.add(p.itemId); }
+        return ids;
+    }
+
+    private static TaskSummary summary(Job job)
+    {
+        return new TaskSummary(job.id, job.createdAt, job.state,
+                job.rules == null || job.rules.platform == null ? "taobao" : job.rules.platform,
+                job.products.size());
     }
 
     public Job get(long owner, String id)
@@ -306,9 +443,11 @@ public class ProductScanService
                 synchronized (job) { p.state = "FETCHING"; save(job); }
                 try
                 {
-                    var product = gateway.fetch(p.itemId, p.platform);
+                    var product = fetchWithRetry(p);
+                    recordProviderSuccess();
                     synchronized (job)
                     {
+                        p.providerFetched = true;
                         p.price = product.getPriceText(); p.categoryName = product.getCategoryName();
                         p.shopUrl = product.getShopUrl(); p.sales = product.getSales(); p.commentCount = product.getCommentCount();
                         p.title = product.getTitle(); p.titleHits = ScanRules.match(p.title, titleWords, false);
@@ -334,14 +473,14 @@ public class ProductScanService
                                     try { Files.write(tmp, inspection.preview()); Files.move(tmp, dest, StandardCopyOption.REPLACE_EXISTING); }
                                     finally { Files.deleteIfExists(tmp); }
                                 }
-                                cached = new Cached(inspection.ocr(), key); cache.put(pic.url, cached);
+                                cached = new Cached(inspection.ocr(), key, inspection.qrCodes()); cache.put(pic.url, cached);
                             }
                             Set<String> hits = new LinkedHashSet<>();
                             for (Line line : cached.ocr.lines) hits.addAll(ScanRules.match(line.text, imageWords, job.rules.detectPhones));
                             synchronized (job)
                             {
-                                pic.ocr = cached.ocr; pic.previewKey = cached.key; pic.hits = List.copyOf(hits); pic.state = "DONE";
-                                if (pic.ocr.lines.stream().anyMatch(line -> line.score < 0.6))
+                                pic.ocr = cached.ocr; pic.previewKey = cached.key; pic.hits = List.copyOf(hits); pic.qrCodes = job.rules.detectQrCodes ? cached.qrCodes : 0; pic.state = "DONE";
+                                if (pic.ocr.lines.stream().anyMatch(line -> line.score < threshold(job)))
                                 { p.incomplete = true; p.warnings.add(pic.kind + pic.index + " 有低置信度文字，请人工核查"); }
                                 save(job);
                             }
@@ -356,7 +495,7 @@ public class ProductScanService
                         boolean unfinished = p.pictures.stream().anyMatch(pic -> !"DONE".equals(pic.state));
                         p.incomplete |= unfinished;
                         p.state = stopping(job) ? "CANCELLED" : "DONE";
-                        p.verdict = !p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty()) ? "MATCHED"
+                        p.verdict = !p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0) ? "MATCHED"
                                 : p.incomplete ? "REVIEW" : "CLEAR";
                         save(job);
                     }
@@ -415,11 +554,12 @@ public class ProductScanService
             temp = Files.createTempFile(storage, "scan-", ".tmp");
             Files.writeString(temp, JSON.toJSONString(job));
             Files.move(temp, storage.resolve(job.id + ".json"), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            history.put(job.id, summary(job));
         }
         catch (Exception e) { throw new ServiceException("任务保存失败，请检查磁盘空间及目录权限"); }
         finally { if (temp != null) try { Files.deleteIfExists(temp); } catch (Exception ignored) { } }
     }
     @PreDestroy
     public void close() { executor.shutdownNow(); }
-    private record Cached(Ocr ocr, String key) { }
+    private record Cached(Ocr ocr, String key, int qrCodes) { }
 }

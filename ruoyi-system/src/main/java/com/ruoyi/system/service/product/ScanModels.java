@@ -17,7 +17,14 @@ public final class ScanModels
         public String titleWords = "";
         public String imageWords = "";
         public boolean detectPhones;
+        /** 是否检测图片中的二维码。 */
+        public boolean detectQrCodes;
+        /** 低于该置信度的 OCR 结果需要复核，支持 0.6、0.5、0.4。 */
+        public double confidenceThreshold = 0.6;
     }
+
+    /** 历史下拉列表仅使用摘要，不携带 CSV、图片识别结果及坐标。 */
+    public record TaskSummary(String id, String createdAt, String state, String platform, int productCount) { }
 
     /** 异步任务快照，包含用户归属、进度和商品结果。 */
     public static class Job
@@ -44,6 +51,8 @@ public final class ScanModels
         public String state = "PENDING";
         public String verdict = "REVIEW";
         public String error;
+        /** 第三方接口已成功返回商品信息，用于后续导入过滤。 */
+        public boolean providerFetched;
         public String review = "NONE";
         public String reviewNote;
         public String reviewedAt;
@@ -65,6 +74,7 @@ public final class ScanModels
         public Ocr ocr;
         public String previewKey;
         public List<String> hits = new ArrayList<>();
+        public int qrCodes;
     }
 
     /** OCR 结果：width/height 是统一方向后的原图尺寸，不是缩放预览尺寸。 */
@@ -79,7 +89,7 @@ public final class ScanModels
     public static class Line
     {
         public String text;
-        // 识别置信度为 0～1；低于 0.6 的已返回文字需要人工核查。
+        // 识别置信度为 0～1；低于任务指定阈值的已返回文字需要人工核查。
         public double score;
         // 原图上的四个角点，每个点为 [x, y]；前端按原图比例绘制标框。
         public List<List<Double>> box;

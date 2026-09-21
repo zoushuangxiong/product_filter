@@ -19,7 +19,7 @@ import com.alibaba.fastjson2.JSON;
 import com.alibaba.fastjson2.JSONObject;
 import com.ruoyi.system.utils.taobao.TaobaoFetchException.Code;
 
-/** 万邦 item_get；一次调用一个商品，不重试、不跟随重定向、不记录带密钥的请求 URL。 */
+/** 商品详情接口客户端；一次调用一个商品，不跟随重定向、不记录带密钥的请求 URL。 */
 public final class OneBoundProductClient
 {
     private static final int MAX_BYTES = 5 * 1024 * 1024;
@@ -36,7 +36,7 @@ public final class OneBoundProductClient
         this.secret = secret;
     }
 
-    /** 按平台调用一次商品详情接口；不自动重试，避免重复扣除接口次数。 */
+    /** 按平台调用一次商品详情接口；重试由任务服务统一控制。 */
     public TaobaoProductInfo getProduct(String itemId, String platform)
     {
         if (!java.util.Set.of("taobao", "1688").contains(platform == null ? "" : platform))
@@ -235,8 +235,9 @@ public final class OneBoundProductClient
     {
         HttpURLConnection connection = (HttpURLConnection) uri.toURL().openConnection();
         connection.setInstanceFollowRedirects(false);
-        connection.setConnectTimeout(5000);
-        connection.setReadTimeout(15000);
+        // 单次调用最多约 11 秒，避免网络异常时一个商品长时间卡住。
+        connection.setConnectTimeout(3000);
+        connection.setReadTimeout(8000);
         connection.setRequestProperty("Accept", "application/json");
         try
         {

@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.ProductWordLibraryMapper">
+    <resultMap id="Library" type="com.ruoyi.system.domain.ProductWordLibrary">
+        <id property="id" column="id"/>
+        <result property="ownerId" column="owner_id"/>
+        <result property="name" column="name"/>
+        <result property="titleWords" column="title_words"/>
+        <result property="imageWords" column="image_words"/>
+        <result property="detectPhones" column="detect_phones"/>
+        <result property="createTime" column="create_time"/>
+        <result property="updateTime" column="update_time"/>
+    </resultMap>
+    <!-- 列表和下拉框只返回摘要，避免一次传输所有词库正文。 -->
+    <select id="selectList" resultMap="Library">
+        select id, name, detect_phones, create_time, update_time
+        from product_word_library where owner_id = #{ownerId}
+        <if test="name != null and name != ''">and name like concat('%', #{name}, '%')</if>
+        order by id desc
+    </select>
+    <select id="selectById" resultMap="Library">
+        select * from product_word_library where id = #{id} and owner_id = #{ownerId}
+    </select>
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        insert into product_word_library
+        (owner_id, name, title_words, image_words, detect_phones, create_by, create_time)
+        values (#{ownerId}, #{name}, #{titleWords}, #{imageWords}, #{detectPhones}, #{createBy}, now())
+    </insert>
+    <update id="update">
+        update product_word_library set name = #{name}, title_words = #{titleWords},
+        image_words = #{imageWords}, detect_phones = #{detectPhones}, update_by = #{updateBy}, update_time = now()
+        where id = #{id} and owner_id = #{ownerId}
+    </update>
+    <delete id="delete">
+        delete from product_word_library where id = #{id} and owner_id = #{ownerId}
+    </delete>
+</mapper>

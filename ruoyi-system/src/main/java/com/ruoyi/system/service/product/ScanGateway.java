@@ -82,5 +82,5 @@ public class ScanGateway
         finally { c.disconnect(); }
     }
 
-    public record Inspection(ScanModels.Ocr ocr, byte[] preview) { }
+    public record Inspection(ScanModels.Ocr ocr, byte[] preview, int qrCodes) { }
 }

@@ -94,6 +94,7 @@ export const constantRoutes = [
 
 // 动态路由，基于用户权限动态去加载
 export const dynamicRoutes = [
+  // 数据库菜单尚未部署时保留本地入口；菜单返回后由权限仓库按路径去重。
   {
     path: '/product',
     component: Layout,

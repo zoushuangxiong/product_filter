@@ -31,11 +31,24 @@ public class ProductScanController
     @GetMapping("/tasks")
     public AjaxResult list() { return AjaxResult.success(service.list(SecurityUtils.getUserId())); }
 
+    @GetMapping("/tasks/usage")
+    public AjaxResult usage() { return AjaxResult.success(service.usage()); }
+
+    @PreAuthorize("@ss.hasPermi('product:scan:use')")
+    @GetMapping("/tasks/checked-ids")
+    public AjaxResult checkedIds(@RequestParam String platform)
+    { return AjaxResult.success(service.checkedIds(SecurityUtils.getUserId(), platform)); }
+
     @GetMapping("/tasks/{id}")
     public AjaxResult get(@PathVariable String id) { return AjaxResult.success(service.get(SecurityUtils.getUserId(), id)); }
 
     @PostMapping("/tasks/{id}/cancel")
     public AjaxResult cancel(@PathVariable String id) { return AjaxResult.success(service.cancel(SecurityUtils.getUserId(), id)); }
+
+    /** 修改已完成任务的低置信度阈值并重新计算结果，不重新调用商品接口。 */
+    @PostMapping("/tasks/{id}/confidence-threshold")
+    public AjaxResult confidenceThreshold(@PathVariable String id, @RequestParam double value)
+    { return AjaxResult.success(service.updateThreshold(SecurityUtils.getUserId(), id, value)); }
 
     @PostMapping("/tasks/{id}/products/{itemId}/review")
     public AjaxResult review(@PathVariable String id, @PathVariable String itemId, @RequestBody ScanModels.Review review)

@@ -7,6 +7,7 @@ import java.util.*;
 import org.opencv.core.*;
 import org.opencv.imgcodecs.Imgcodecs;
 import org.opencv.imgproc.Imgproc;
+import org.opencv.objdetect.QRCodeDetector;
 import org.locationtech.jts.geom.*;
 import org.locationtech.jts.operation.buffer.BufferOp;
 import org.locationtech.jts.operation.buffer.BufferParameters;
@@ -115,7 +116,18 @@ final class EmbeddedOcr
             MatOfInt params = new MatOfInt(Imgcodecs.IMWRITE_JPEG_QUALITY, 85);
             try { if (!Imgcodecs.imencode(".jpg", preview, jpg, params)) throw new IOException("Preview encoding failed"); }
             finally { params.release(); }
-            return new ScanGateway.Inspection(result, jpg.toArray());
+            int qrCodes = 0;
+            QRCodeDetector qr = new QRCodeDetector();
+            Mat points = new Mat();
+            List<Mat> straight = new ArrayList<>();
+            try
+            {
+                List<String> decoded = new ArrayList<>();
+                if (qr.detectAndDecodeMulti(image, decoded, points, straight)) qrCodes = decoded.size();
+            }
+            catch (RuntimeException ignored) { /* 个别二维码图片不支持解码时继续完成 OCR。 */ }
+            finally { points.release(); for (Mat code : straight) code.release(); }
+            return new ScanGateway.Inspection(result, jpg.toArray(), qrCodes);
         }
         finally { encoded.release(); image.release(); preview.release(); jpg.release(); }
     }

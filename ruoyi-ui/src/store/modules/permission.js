@@ -46,7 +46,13 @@ const usePermissionStore = defineStore(
             const defaultRoutes = filterAsyncRouter(defaultData)
             const asyncRoutes = filterDynamicRoutes(dynamicRoutes)
             asyncRoutes.forEach(route => { router.addRoute(route) })
-            const visibleLocalRoutes = asyncRoutes.filter(route => !route.hidden)
+            // 数据库菜单部署后优先使用数据库路由；未部署时使用本地备用入口，避免菜单消失。
+            const dbPaths = new Set()
+            function collectPaths(routes) {
+              routes.forEach(route => { if (route.path) dbPaths.add(route.path.startsWith('/') ? route.path : `/${route.path}`); if (route.children) collectPaths(route.children) })
+            }
+            collectPaths(sidebarRoutes)
+            const visibleLocalRoutes = asyncRoutes.filter(route => !route.hidden && !dbPaths.has(route.path))
             this.setRoutes(rewriteRoutes.concat(visibleLocalRoutes))
             this.setSidebarRouters(constantRoutes.concat(sidebarRoutes, visibleLocalRoutes))
             this.setDefaultRoutes(sidebarRoutes.concat(visibleLocalRoutes))
