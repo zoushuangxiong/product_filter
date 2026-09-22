@@ -11,6 +11,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="titleWords"   column="title_words"  />
         <result property="imageWords"   column="image_words"  />
         <result property="detectPhones" column="detect_phones" />
+        <result property="detectQrCodes" column="detect_qr_codes" />
         <result property="createBy"     column="create_by"    />
         <result property="createTime"   column="create_time"  />
         <result property="updateBy"     column="update_by"    />
@@ -19,7 +20,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <sql id="selectProductWordLibraryVo">
         select id, owner_id, name, title_words, image_words, detect_phones,
-               create_by, create_time, update_by, update_time
+               detect_qr_codes, create_by, create_time, update_by, update_time
         from product_word_library
     </sql>
 
@@ -46,6 +47,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             title_words,
             image_words,
             detect_phones,
+            detect_qr_codes,
             create_by,
             create_time,
         </trim>
@@ -55,6 +57,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             #{titleWords},
             #{imageWords},
             #{detectPhones},
+            #{detectQrCodes},
             #{createBy},
             now(),
         </trim>
@@ -67,6 +70,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="titleWords != null">title_words = #{titleWords},</if>
             <if test="imageWords != null">image_words = #{imageWords},</if>
             <if test="detectPhones != null">detect_phones = #{detectPhones},</if>
+            <if test="detectQrCodes != null">detect_qr_codes = #{detectQrCodes},</if>
             update_by = #{updateBy},
             update_time = now(),
         </trim>

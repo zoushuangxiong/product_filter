@@ -136,12 +136,14 @@ public class ProductWordLibraryServiceImpl implements IProductWordLibraryService
         {
             throw new ServiceException("请填写标题过滤词");
         }
-        if (images.isEmpty() && !Boolean.TRUE.equals(productWordLibrary.getDetectPhones()))
+        if (images.isEmpty() && !Boolean.TRUE.equals(productWordLibrary.getDetectPhones())
+            && !Boolean.TRUE.equals(productWordLibrary.getDetectQrCodes()))
         {
-            throw new ServiceException("请填写图片文字过滤词，或启用手机号检测");
+            throw new ServiceException("请填写图片文字过滤词，或启用手机号/二维码检测");
         }
         productWordLibrary.setTitleWords(String.join("\n", title));
         productWordLibrary.setImageWords(String.join("\n", images));
         productWordLibrary.setDetectPhones(Boolean.TRUE.equals(productWordLibrary.getDetectPhones()));
+        productWordLibrary.setDetectQrCodes(Boolean.TRUE.equals(productWordLibrary.getDetectQrCodes()));
     }
 }

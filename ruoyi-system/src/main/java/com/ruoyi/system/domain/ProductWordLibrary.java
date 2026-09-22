@@ -32,6 +32,9 @@ public class ProductWordLibrary extends BaseEntity
     /** 是否额外检测图片中的11位手机号 */
     private Boolean detectPhones;
 
+    /** 是否检测图片中的二维码 */
+    private Boolean detectQrCodes;
+
     public void setId(Long id)
     {
         this.id = id;
@@ -92,6 +95,16 @@ public class ProductWordLibrary extends BaseEntity
         return detectPhones;
     }
 
+    public void setDetectQrCodes(Boolean detectQrCodes)
+    {
+        this.detectQrCodes = detectQrCodes;
+    }
+
+    public Boolean getDetectQrCodes()
+    {
+        return detectQrCodes;
+    }
+
     @Override
     public String toString()
     {
@@ -102,6 +115,7 @@ public class ProductWordLibrary extends BaseEntity
             .append("titleWords", getTitleWords())
             .append("imageWords", getImageWords())
             .append("detectPhones", getDetectPhones())
+            .append("detectQrCodes", getDetectQrCodes())
             .toString();
     }
 }

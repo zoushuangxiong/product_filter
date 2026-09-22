@@ -1,7 +1,7 @@
 # 今日成功调用次数的展示额度（全服务共享），每日按北京时间零点重新统计。
 product:
   scan:
-    daily-limit: 20000
+    daily-limit: 2000
 
 # 项目相关配置
 ruoyi:

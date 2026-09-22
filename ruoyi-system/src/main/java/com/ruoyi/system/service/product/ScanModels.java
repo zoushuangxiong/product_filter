@@ -24,7 +24,8 @@ public final class ScanModels
     }
 
     /** 历史下拉列表仅使用摘要，不携带 CSV、图片识别结果及坐标。 */
-    public record TaskSummary(String id, String createdAt, String state, String platform, int productCount) { }
+    public record TaskSummary(String id, String createdAt, String state, String platform, int productCount,
+            String startedAt, String completedAt, long durationMillis) { }
 
     /** 异步任务快照，包含用户归属、进度和商品结果。 */
     public static class Job
@@ -33,12 +34,32 @@ public final class ScanModels
         public long ownerId;
         public String createdAt;
         public String updatedAt;
+        /** 实际开始处理时间，不包含排队时间。 */
+        public String startedAt;
+        /** 实际处理结束时间。 */
+        public String completedAt;
+        /** 实际处理耗时，单位毫秒。 */
+        public long durationMillis;
         public String state = "QUEUED";
         public boolean cancelRequested;
         public String error;
         public Request rules;
         public String ruleVersion = "nfkc-casefold-substring-v1";
         public List<Product> products = new ArrayList<>();
+        /** 单商品人工重试时使用，任务完成后清空。 */
+        public String retryOnlyItemId;
+    }
+
+    /** 分页查询响应；统计覆盖整个任务，products 只包含当前页。 */
+    public static class TaskPage
+    {
+        public Job job;
+        public int pageNum, pageSize, total;
+        public int productCount, matched, review, incomplete, providerError, passed;
+        public int processed, failed, totalImages, processedImages;
+        public int currentIndex;
+        public String currentItemId, currentState;
+        public int currentImages, currentProcessedImages;
     }
 
     /** 单商品结果；执行状态、规则判定和人工复核分别保存。 */
@@ -51,6 +72,8 @@ public final class ScanModels
         public String state = "PENDING";
         public String verdict = "REVIEW";
         public String error;
+        /** 商品信息获取异常的人工重试次数。 */
+        public int retryCount;
         /** 第三方接口已成功返回商品信息，用于后续导入过滤。 */
         public boolean providerFetched;
         public String review = "NONE";

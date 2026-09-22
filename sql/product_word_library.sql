@@ -6,6 +6,7 @@ CREATE TABLE IF NOT EXISTS product_word_library (
     title_words mediumtext NOT NULL COMMENT '标题过滤词，按换行分隔',
     image_words mediumtext NOT NULL COMMENT '图片文字过滤词，按换行分隔',
     detect_phones tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否检测图片中的手机号',
+    detect_qr_codes tinyint(1) NOT NULL DEFAULT 0 COMMENT '是否检测图片中的二维码',
     create_by varchar(64) NOT NULL DEFAULT '',
     create_time datetime NOT NULL,
     update_by varchar(64) NOT NULL DEFAULT '',

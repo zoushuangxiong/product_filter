@@ -58,7 +58,7 @@ public final class ScanRules
     /** 按换行拆词，去除首尾空白和重复词；逗号、顿号和词内空格不作分隔。 */
     public static List<String> words(String text)
     {
-        if (text == null || text.length() > 30000) throw new ServiceException("词库不能为空或超过 30000 字符");
+        if (text == null) throw new ServiceException("词库内容不能为空");
         Set<String> result = new LinkedHashSet<>();
         for (String word : text.split("\\R"))
         {
@@ -66,8 +66,25 @@ public final class ScanRules
             if (w.length() > 100) throw new ServiceException("单条过滤词不能超过 100 字符");
             if (!w.isEmpty()) result.add(w);
         }
-        if (result.size() > 500) throw new ServiceException("每份词库最多 500 条");
+        if (result.size() > 10_000) throw new ServiceException("每份词库最多 10,000 条");
         return List.copyOf(result);
+    }
+
+    /**
+     * 匹配标题过滤词，统一全半角及大小写后，按词库顺序命中一个即停止。
+     *
+     * @param text 商品标题
+     * @param words 标题过滤词
+     * @return 首个命中词；未命中时返回空集合
+     */
+    public static List<String> matchTitle(String text, List<String> words)
+    {
+        String normalized = normalize(text);
+        for (String word : words)
+        {
+            if (normalized.contains(normalize(word))) return List.of(word);
+        }
+        return List.of();
     }
 
     /** 统一全半角及大小写后进行包含匹配；手机号必须是独立的 11 位数字。 */

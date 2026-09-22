@@ -40,10 +40,21 @@ public class ProductScanController
     { return AjaxResult.success(service.checkedIds(SecurityUtils.getUserId(), platform)); }
 
     @GetMapping("/tasks/{id}")
-    public AjaxResult get(@PathVariable String id) { return AjaxResult.success(service.get(SecurityUtils.getUserId(), id)); }
+    public AjaxResult get(@PathVariable String id,
+            @RequestParam(defaultValue = "1") int pageNum,
+            @RequestParam(defaultValue = "50") int pageSize,
+            @RequestParam(defaultValue = "ALL") String filter)
+    {
+        return AjaxResult.success(service.page(SecurityUtils.getUserId(), id, pageNum, pageSize, filter));
+    }
 
     @PostMapping("/tasks/{id}/cancel")
     public AjaxResult cancel(@PathVariable String id) { return AjaxResult.success(service.cancel(SecurityUtils.getUserId(), id)); }
+
+    /** 人工重新尝试获取单个商品信息，最多一次。 */
+    @PostMapping("/tasks/{id}/products/{itemId}/retry")
+    public AjaxResult retry(@PathVariable String id, @PathVariable String itemId)
+    { return AjaxResult.success(service.retryProduct(SecurityUtils.getUserId(), id, itemId)); }
 
     /** 修改已完成任务的低置信度阈值并重新计算结果，不重新调用商品接口。 */
     @PostMapping("/tasks/{id}/confidence-threshold")

@@ -6,6 +6,7 @@ import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.time.Instant;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -44,6 +45,7 @@ public class ProductScanService
     private final Object usageLock = new Object();
     private LocalDate usageDate;
     private int usageCount;
+    private int reservedCount;
     // 最多同时处理 2 个任务，另排队 20 个；单用户最多有 1 个进行中的任务。
     private final ThreadPoolExecutor executor = new ThreadPoolExecutor(2, 2, 0, TimeUnit.SECONDS,
             new ArrayBlockingQueue<>(20), runnable -> {
@@ -51,11 +53,11 @@ public class ProductScanService
             });
 
     public ProductScanService(@Value("${product.scan.storage:${user.home}/.product-filter/scans}") String storage,
-            @Value("${onebound.key:}") String key, @Value("${onebound.secret:}") String secret, @Value("${product.scan.daily-limit:20000}") int dailyLimit)
+            @Value("${onebound.key:}") String key, @Value("${onebound.secret:}") String secret, @Value("${product.scan.daily-limit:2000}") int dailyLimit)
     {
         this.storage = Path.of(storage).toAbsolutePath();
         this.gateway = new ScanGateway(key, secret);
-        this.dailyLimit = dailyLimit > 0 ? dailyLimit : 20000;
+        this.dailyLimit = dailyLimit > 0 ? dailyLimit : 2000;
         this.usageFile = this.storage.resolve("daily-usage.json");
         try
         {
@@ -97,29 +99,57 @@ public class ProductScanService
                 {
                     var usage = JSON.parseObject(Files.readString(usageFile));
                     LocalDate saved = LocalDate.parse(usage.getString("date"));
-                    if (saved.equals(usageDate)) usageCount = Math.max(0, usage.getIntValue("count"));
+                    if (saved.equals(usageDate))
+                    {
+                        usageCount = Math.max(0, usage.getIntValue("count"));
+                        reservedCount = Math.max(0, usage.getIntValue("reserved"));
+                    }
                 }
             }
             catch (Exception e) { throw new IllegalStateException("无法读取每日调用计数，请检查 daily-usage.json", e); }
         }
     }
 
-    /** 只有第三方成功返回商品信息后计数一次；失败、超时和参数错误不计。 */
-    private void recordProviderSuccess()
+    /** 调用第三方前预占额度；并发任务共享同一把锁，避免超额调用。 */
+    private boolean reserveProviderSlot()
     {
         synchronized (usageLock)
         {
             LocalDate today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
-            if (!today.equals(usageDate)) { usageDate = today; usageCount = 0; }
-            usageCount++;
-            try
-            {
-                Path temp = storage.resolve("daily-usage.tmp");
-                Files.writeString(temp, JSON.toJSONString(Map.of("date", usageDate.toString(), "count", usageCount)));
-                Files.move(temp, usageFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
-            }
-            catch (Exception e) { throw new IllegalStateException("每日调用计数保存失败，请检查任务目录权限", e); }
+            if (!today.equals(usageDate)) { usageDate = today; usageCount = 0; reservedCount = 0; }
+            if (usageCount + reservedCount >= dailyLimit) return false;
+            reservedCount++;
+            saveUsage();
+            return true;
         }
+    }
+
+    /** 第三方成功返回后正式扣除预占额度。 */
+    private void recordProviderSuccess()
+    {
+        synchronized (usageLock)
+        {
+            reservedCount = Math.max(0, reservedCount - 1);
+            usageCount++;
+            saveUsage();
+        }
+    }
+
+    /** 第三方调用失败时释放预占额度。 */
+    private void releaseProviderSlot()
+    {
+        synchronized (usageLock) { reservedCount = Math.max(0, reservedCount - 1); saveUsage(); }
+    }
+
+    private void saveUsage()
+    {
+        try
+        {
+            Path temp = storage.resolve("daily-usage.tmp");
+            Files.writeString(temp, JSON.toJSONString(Map.of("date", usageDate.toString(), "count", usageCount, "reserved", reservedCount)));
+            Files.move(temp, usageFile, StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE);
+        }
+        catch (Exception e) { throw new IllegalStateException("每日调用计数保存失败，请检查任务目录权限", e); }
     }
 
     public Map<String, Object> usage()
@@ -278,12 +308,94 @@ public class ProductScanService
     {
         return new TaskSummary(job.id, job.createdAt, job.state,
                 job.rules == null || job.rules.platform == null ? "taobao" : job.rules.platform,
-                job.products.size());
+                job.products.size(), job.startedAt, job.completedAt, job.durationMillis);
     }
 
     public Job get(long owner, String id)
     {
         Job job = owned(owner, id); synchronized (job) { return copy(job); }
+    }
+
+    /**
+     * 按结果类型筛选后分页，保留全任务统计；仅复制当前页的图片和 OCR 证据。
+     *
+     * @param owner 当前用户ID
+     * @param id 任务ID
+     * @param pageNum 页码，从1开始
+     * @param pageSize 每页条数，最多100条
+     * @param filter 结果类型
+     * @return 当前页及全任务统计
+     */
+    public TaskPage page(long owner, String id, int pageNum, int pageSize, String filter)
+    {
+        if (pageNum < 1 || pageSize < 1 || pageSize > 100)
+            throw new ServiceException("分页参数不正确，每页最多100条");
+        if (!Set.of("ALL", "MATCHED", "REVIEW", "INCOMPLETE", "PROVIDER_ERROR", "ELIGIBLE").contains(filter))
+            throw new ServiceException("结果类型不正确");
+        Job source = owned(owner, id);
+        synchronized (source)
+        {
+            TaskPage result = new TaskPage();
+            List<Product> filtered = new ArrayList<>();
+            result.productCount = source.products.size();
+            for (int i = 0; i < source.products.size(); i++)
+            {
+                Product p = source.products.get(i);
+                boolean providerError = p.error != null && Set.of("MISSING_API_CREDENTIALS", "PROVIDER_ACCESS_DENIED",
+                        "PROVIDER_ERROR", "RATE_LIMITED", "ITEM_UNAVAILABLE", "INVALID_RESPONSE", "TIMEOUT",
+                        "NETWORK_ERROR", "HTTP_ERROR", "RESPONSE_TOO_LARGE").contains(p.error);
+                boolean matched = "MATCHED".equals(p.verdict);
+                boolean review = !providerError && "DONE".equals(p.state) && p.incomplete;
+                boolean incomplete = !providerError && !"DONE".equals(p.state);
+                boolean passed = ScanRules.exportable(p);
+                if (providerError) result.providerError++;
+                if (matched) result.matched++;
+                if (review) result.review++;
+                if (incomplete) result.incomplete++;
+                if (passed) result.passed++;
+                if ("DONE".equals(p.state) || "FAILED".equals(p.state)) result.processed++;
+                if ("FAILED".equals(p.state)) result.failed++;
+                int processedImages = (int) p.pictures.stream()
+                        .filter(pic -> "DONE".equals(pic.state) || "FAILED".equals(pic.state)).count();
+                result.totalImages += p.pictures.size();
+                result.processedImages += processedImages;
+                if (active(source) && result.currentIndex == 0
+                        && ("FETCHING".equals(p.state) || "SCANNING".equals(p.state)))
+                {
+                    result.currentIndex = i + 1;
+                    result.currentItemId = p.itemId;
+                    result.currentState = p.state;
+                    result.currentImages = p.pictures.size();
+                    result.currentProcessedImages = processedImages;
+                }
+                if (switch (filter) {
+                    case "MATCHED" -> matched;
+                    case "REVIEW" -> review;
+                    case "INCOMPLETE" -> incomplete;
+                    case "PROVIDER_ERROR" -> providerError;
+                    case "ELIGIBLE" -> passed;
+                    default -> true;
+                }) filtered.add(p);
+            }
+            result.total = filtered.size();
+            result.pageSize = pageSize;
+            result.pageNum = Math.min(pageNum, Math.max(1, (result.total + pageSize - 1) / pageSize));
+            int from = (result.pageNum - 1) * pageSize;
+            Job view = new Job();
+            view.id = source.id; view.ownerId = source.ownerId;
+            view.createdAt = source.createdAt; view.updatedAt = source.updatedAt;
+            view.startedAt = source.startedAt; view.completedAt = source.completedAt;
+            view.durationMillis = source.durationMillis; view.state = source.state;
+            view.cancelRequested = source.cancelRequested; view.error = source.error;
+            view.ruleVersion = source.ruleVersion;
+            // 原始导入内容和完整词库仍保存在任务快照中，分页展示只需平台和阈值。
+            view.rules = new Request();
+            view.rules.platform = source.rules.platform;
+            view.rules.confidenceThreshold = source.rules.confidenceThreshold;
+            view.products = filtered.subList(from, Math.min(from + pageSize, result.total));
+            result.job = copy(view);
+            return result;
+        }
     }
 
     /** 设置停止标记，在处理边界停止后续工作；不会撤销已发出的请求。 */
@@ -292,6 +404,28 @@ public class ProductScanService
         Job job = owned(owner, id); synchronized (job)
         {
             if (active(job)) { job.cancelRequested = true; save(job); }
+            return copy(job);
+        }
+    }
+
+    /** 重新尝试获取单个商品；仅允许商品信息接口异常且最多重试一次。 */
+    public Job retryProduct(long owner, String id, String itemId)
+    {
+        Job job = owned(owner, id);
+        synchronized (job)
+        {
+            if (active(job)) throw new ServiceException("任务正在执行，请等待任务结束");
+            Product product = job.products.stream().filter(v -> v.itemId.equals(itemId)).findFirst()
+                    .orElseThrow(() -> new ServiceException("商品不存在"));
+            if (!Set.of("MISSING_API_CREDENTIALS", "PROVIDER_ACCESS_DENIED", "PROVIDER_ERROR", "RATE_LIMITED",
+                    "ITEM_UNAVAILABLE", "INVALID_RESPONSE", "TIMEOUT", "NETWORK_ERROR", "HTTP_ERROR", "RESPONSE_TOO_LARGE").contains(product.error))
+                throw new ServiceException("当前商品不是信息获取异常");
+            if (product.retryCount >= 1) throw new ServiceException("该商品已重试过一次");
+            product.retryCount++;
+            product.state = "PENDING"; product.error = null; product.incomplete = false;
+            product.verdict = "REVIEW"; product.title = null; product.titleHits.clear(); product.pictures.clear();
+            job.retryOnlyItemId = itemId; job.state = "QUEUED"; job.cancelRequested = false; save(job);
+            executor.execute(() -> run(job));
             return copy(job);
         }
     }
@@ -352,7 +486,7 @@ public class ProductScanService
     private static final List<String> TEMPLATE = List.of("序号", "关键词", "主图", "商品链接", "类目",
             "商品标题", "店铺链接", "价格", "销量", "评论数", "状态");
 
-    /** 固定输出 11 列，优先使用导入列值并保留行顺序/重复行；旧任务缺少 CSV 时用快照补列。 */
+    /** 固定输出 11 列，优先使用导入列值并按商品 ID 去重；旧任务缺少 CSV 时用快照补列。 */
     private static byte[] exportTemplate(Job job)
     {
         StringBuilder out = new StringBuilder("\uFEFF" + String.join(",", TEMPLATE) + "\r\n");
@@ -363,12 +497,14 @@ public class ProductScanService
             var source = ScanCsvSource.parse(job.rules.sourceCsv);
             List<String> headers = source.header() ? source.rows().get(0).cells().stream().map(String::trim).toList() : List.of();
             int ordinal = 0;
+            Set<String> exportedIds = new LinkedHashSet<>();
             for (var row : source.rows().subList(source.header() ? 1 : 0, source.rows().size()))
             {
                 if (row.raw().isBlank()) continue;
-                ordinal++;
                 Product product = products.get(ScanRules.itemId(row.cells().get(source.column()).trim(), job.rules.platform == null ? "taobao" : job.rules.platform));
                 if (product == null || !ScanRules.exportable(product)) continue;
+                if (!exportedIds.add(product.itemId)) continue;
+                ordinal++;
                 List<String> cells = templateCells(product, ordinal);
                 for (int i = 0; i < TEMPLATE.size(); i++)
                 {
@@ -416,7 +552,7 @@ public class ProductScanService
         return switch (value)
         {
             case "QUEUED" -> "排队中"; case "PENDING" -> "待处理";
-            case "RUNNING" -> "检测中"; case "FETCHING" -> "获取商品中"; case "SCANNING" -> "识别图片中";
+            case "RUNNING" -> "检测中"; case "FETCHING" -> "获取商品中"; case "SCANNING" -> "识别图片中"; case "SKIPPED" -> "命中词库";
             case "DONE", "COMPLETED" -> "完成"; case "FAILED" -> "失败";
             case "CANCELLED" -> "已停止"; case "INTERRUPTED" -> "服务重启中断";
             case "MATCHED" -> "命中词库"; case "CLEAR" -> "未命中"; case "REVIEW" -> "待复核";
@@ -433,27 +569,55 @@ public class ProductScanService
     {
         try
         {
-            synchronized (job) { job.state = "RUNNING"; save(job); }
+            synchronized (job)
+            {
+                job.state = "RUNNING";
+                job.startedAt = Instant.now().toString();
+                job.completedAt = null;
+                job.durationMillis = 0;
+                save(job);
+            }
             // 同一任务中相同图片 URL 只识别一次，各商品仍保留自己的图片记录。
             Map<String, Cached> cache = new HashMap<>();
             List<String> titleWords = ScanRules.words(job.rules.titleWords), imageWords = ScanRules.words(job.rules.imageWords);
             for (Product p : job.products)
             {
+                if (job.retryOnlyItemId != null && !job.retryOnlyItemId.equals(p.itemId)) continue;
+                if (job.retryOnlyItemId == null && "DONE".equals(p.state)) continue;
                 if (stopping(job)) break;
                 synchronized (job) { p.state = "FETCHING"; save(job); }
+                boolean reserved = false;
                 try
                 {
+                    if (!reserveProviderSlot())
+                    {
+                        synchronized (job) { p.state = "PENDING"; p.error = "DAILY_LIMIT_EXCEEDED"; p.incomplete = true; save(job); }
+                        break;
+                    }
+                    reserved = true;
                     var product = fetchWithRetry(p);
                     recordProviderSuccess();
+                    reserved = false;
                     synchronized (job)
                     {
                         p.providerFetched = true;
                         p.price = product.getPriceText(); p.categoryName = product.getCategoryName();
                         p.shopUrl = product.getShopUrl(); p.sales = product.getSales(); p.commentCount = product.getCommentCount();
-                        p.title = product.getTitle(); p.titleHits = ScanRules.match(p.title, titleWords, false);
+                        p.title = product.getTitle(); p.titleHits = ScanRules.matchTitle(p.title, titleWords);
                         p.warnings.add("检测范围为接口实际返回内容；未命中词库不代表平台合规或上游图片完整");
                         addPictures(p, "MAIN", product.getMainImages()); addPictures(p, "DETAIL", product.getDetailImages());
                         p.state = "SCANNING"; save(job);
+                    }
+                    // 标题已经命中过滤词时，商品确定不通过，无需继续下载和识别图片。
+                    if (!p.titleHits.isEmpty())
+                    {
+                        synchronized (job)
+                        {
+                            p.state = "DONE";
+                            p.verdict = "MATCHED";
+                            save(job);
+                        }
+                        continue;
                     }
                     for (Picture pic : p.pictures)
                     {
@@ -484,6 +648,21 @@ public class ProductScanService
                                 { p.incomplete = true; p.warnings.add(pic.kind + pic.index + " 有低置信度文字，请人工核查"); }
                                 save(job);
                             }
+                            // 当前图片已经命中时，商品确定不通过，跳过同一商品剩余图片。
+                            if (!hits.isEmpty() || (job.rules.detectQrCodes && cached.qrCodes > 0))
+                            {
+                                synchronized (job)
+                                {
+                                    boolean current = false;
+                                    for (Picture remaining : p.pictures)
+                                    {
+                                        if (remaining == pic) { current = true; continue; }
+                                        if (current && "PENDING".equals(remaining.state)) remaining.state = "SKIPPED";
+                                    }
+                                    save(job);
+                                }
+                                break;
+                            }
                         }
                         catch (Exception e)
                         {
@@ -492,7 +671,7 @@ public class ProductScanService
                     }
                     synchronized (job)
                     {
-                        boolean unfinished = p.pictures.stream().anyMatch(pic -> !"DONE".equals(pic.state));
+                        boolean unfinished = p.pictures.stream().anyMatch(pic -> !"DONE".equals(pic.state) && !"SKIPPED".equals(pic.state));
                         p.incomplete |= unfinished;
                         p.state = stopping(job) ? "CANCELLED" : "DONE";
                         p.verdict = !p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0) ? "MATCHED"
@@ -502,6 +681,7 @@ public class ProductScanService
                 }
                 catch (Exception e)
                 {
+                    if (reserved) releaseProviderSlot();
                     synchronized (job)
                     {
                         p.state = "FAILED"; p.incomplete = true;
@@ -512,14 +692,23 @@ public class ProductScanService
             }
             synchronized (job)
             {
+                job.retryOnlyItemId = null;
                 job.state = stopping(job) ? "CANCELLED" : "COMPLETED";
+                job.completedAt = Instant.now().toString();
+                job.durationMillis = Duration.between(Instant.parse(job.startedAt), Instant.parse(job.completedAt)).toMillis();
                 for (Product p : job.products) if ("PENDING".equals(p.state)) { p.state = "CANCELLED"; p.incomplete = true; }
                 save(job);
             }
         }
         catch (Exception e)
         {
-            synchronized (job) { job.state = "FAILED"; job.error = "任务处理或保存失败，请检查服务端存储"; }
+            synchronized (job)
+            {
+                job.state = "FAILED"; job.error = "任务处理或保存失败，请检查服务端存储";
+                job.completedAt = Instant.now().toString();
+                if (job.startedAt != null) job.durationMillis = Duration.between(Instant.parse(job.startedAt), Instant.parse(job.completedAt)).toMillis();
+                save(job);
+            }
         }
     }
 

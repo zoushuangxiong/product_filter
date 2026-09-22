@@ -23,11 +23,12 @@
     <el-dialog v-model="dialog" :title="readOnly ? '查看词库' : form.id ? '编辑词库' : '新增词库'" width="720px" style="max-width:95vw" :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving">
       <el-form ref="formRef" :model="form" :rules="rules" label-position="top" :disabled="saving || readOnly">
         <el-form-item label="词库名称" prop="name"><el-input v-model="form.name" maxlength="50" show-word-limit placeholder="例如：通用过滤词、服饰过滤词"/></el-form-item>
-        <el-form-item label="标题过滤词" prop="titleWords"><el-input v-model="form.titleWords" type="textarea" :rows="6" maxlength="30000" placeholder="每行一个过滤词"/></el-form-item>
-        <el-form-item label="图片文字过滤词" prop="imageWords"><el-input v-model="form.imageWords" type="textarea" :rows="6" maxlength="30000" placeholder="每行一个过滤词；不填写时需启用手机号检测"/></el-form-item>
+        <el-form-item label="标题过滤词" prop="titleWords"><el-input v-model="form.titleWords" type="textarea" :rows="6" placeholder="每行一个过滤词"/></el-form-item>
+        <el-form-item label="图片文字过滤词" prop="imageWords"><el-input v-model="form.imageWords" type="textarea" :rows="6" placeholder="每行一个过滤词；不填写时需启用手机号检测"/></el-form-item>
         <el-checkbox v-model="form.detectPhones">同时筛查图片中的 11 位手机号</el-checkbox>
+        <el-checkbox v-model="form.detectQrCodes">检测图片中的二维码</el-checkbox>
       </el-form>
-      <p class="word-hint">按换行分隔：每行一个词，按回车换行；逗号、顿号、空格不会分隔词语。标题和图片各最多 500 个词，每词最多 100 字符，每份最多 30,000 字符。标题过滤词必填；图片过滤词和手机号检测至少选一项。</p>
+      <p class="word-hint">按换行分隔：每行一个词，按回车换行；逗号、顿号、空格不会分隔词语。标题过滤词最多 10,000 个词，图片文字过滤词最多 10,000 个词，每个词最多 100 字符，不限制词库总字符数。标题过滤词必填；图片过滤词、手机号检测和二维码检测至少选一项。</p>
       <template #footer><el-button :disabled="saving" @click="dialog = false">{{ readOnly ? '关闭' : '取消' }}</el-button><el-button v-if="!readOnly" type="primary" :loading="saving" @click="save">保存</el-button></template>
     </el-dialog>
   </div>
@@ -41,7 +42,7 @@ import * as api from '@/api/product/wordLibrary'
 const query = reactive({ name: '', pageNum: 1, pageSize: 10 })
 const rows = ref([]), total = ref(0), loading = ref(false), loadError = ref(false)
 const dialog = ref(false), saving = ref(false), readOnly = ref(false), formRef = ref()
-const blank = () => ({ id: null, name: '', titleWords: '', imageWords: '', detectPhones: false })
+const blank = () => ({ id: null, name: '', titleWords: '', imageWords: '', detectPhones: false, detectQrCodes: false })
 const form = reactive(blank())
 // 与服务端保持一致：按换行拆词并去重，标点和词内空格属于词语内容。
 function validateWords(required) {
@@ -49,8 +50,8 @@ function validateWords(required) {
     const text = value || ''
     const words = [...new Set(text.split(/\r\n|[\n\r\v\f\u0085\u2028\u2029]/).map(s => s.trim()).filter(Boolean))]
     if (required && !words.length) return done(new Error('请填写标题过滤词'))
-    if (text.length > 30000 || words.length > 500 || words.some(s => s.length > 100)) return done(new Error('最多 500 个词，每词最多 100 字符，总计最多 30,000 字符'))
-    if (!required && !words.length && !form.detectPhones) return done(new Error('请填写图片文字过滤词，或启用手机号检测'))
+    if (words.length > 10000 || words.some(s => s.length > 100)) return done(new Error('当前字段最多 10,000 个词，每个词最多 100 字符'))
+    if (!required && !words.length && !form.detectPhones && !form.detectQrCodes) return done(new Error('请填写图片文字过滤词，或启用手机号/二维码检测'))
     done()
   }
 }
@@ -94,7 +95,7 @@ async function save() {
   if (saving.value || !await formRef.value.validate().catch(() => false)) return
   saving.value = true
   try {
-    const data = { id: form.id, name: form.name, titleWords: form.titleWords, imageWords: form.imageWords, detectPhones: form.detectPhones }
+    const data = { id: form.id, name: form.name, titleWords: form.titleWords, imageWords: form.imageWords, detectPhones: form.detectPhones, detectQrCodes: form.detectQrCodes }
     await (form.id ? api.updateLibrary(data) : api.addLibrary(data))
     ElMessage.success('词库已保存')
     dialog.value = false
