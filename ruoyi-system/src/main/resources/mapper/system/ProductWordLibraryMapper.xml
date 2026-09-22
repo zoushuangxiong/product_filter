@@ -3,40 +3,78 @@
 PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
 <mapper namespace="com.ruoyi.system.mapper.ProductWordLibraryMapper">
+
     <resultMap type="ProductWordLibrary" id="ProductWordLibraryResult">
-        <id property="id"    column="id"    />
-        <result property="ownerId"    column="owner_id"    />
-        <result property="name"    column="name"    />
-        <result property="titleWords"    column="title_words"    />
-        <result property="imageWords"    column="image_words"    />
-        <result property="detectPhones"    column="detect_phones"    />
-        <result property="createTime"    column="create_time"    />
-        <result property="updateTime"    column="update_time"    />
+        <id     property="id"          column="id"           />
+        <result property="ownerId"      column="owner_id"     />
+        <result property="name"         column="name"         />
+        <result property="titleWords"   column="title_words"  />
+        <result property="imageWords"   column="image_words"  />
+        <result property="detectPhones" column="detect_phones" />
+        <result property="createBy"     column="create_by"    />
+        <result property="createTime"   column="create_time"  />
+        <result property="updateBy"     column="update_by"    />
+        <result property="updateTime"   column="update_time"  />
     </resultMap>
-    <!-- 列表和下拉框只返回摘要，避免一次传输所有词库正文。 -->
-    <select id="selectProductWordLibraryList" parameterType="ProductWordLibrary" resultMap="ProductWordLibraryResult">
-        select id, name, detect_phones, create_time, update_time
+
+    <sql id="selectProductWordLibraryVo">
+        select id, owner_id, name, title_words, image_words, detect_phones,
+               create_by, create_time, update_by, update_time
         from product_word_library
+    </sql>
+
+    <select id="selectProductWordLibraryList" parameterType="ProductWordLibrary" resultMap="ProductWordLibraryResult">
+        <include refid="selectProductWordLibraryVo"/>
         <where>
-            owner_id = #{ownerId}
-            <if test="name != null and name.trim() != ''">and name like concat('%', #{name}, '%')</if>
+            <if test="name != null and name.trim() != ''">
+                and name like concat('%', #{name}, '%')
+            </if>
         </where>
         order by id desc
     </select>
-    <select id="selectProductWordLibraryById" resultMap="ProductWordLibraryResult">
-        select * from product_word_library where id = #{id} and owner_id = #{ownerId}
+
+    <select id="selectProductWordLibraryById" parameterType="Long" resultMap="ProductWordLibraryResult">
+        <include refid="selectProductWordLibraryVo"/>
+        where id = #{id}
     </select>
+
     <insert id="insertProductWordLibrary" parameterType="ProductWordLibrary" useGeneratedKeys="true" keyProperty="id">
         insert into product_word_library
-        (owner_id, name, title_words, image_words, detect_phones, create_by, create_time)
-        values (#{ownerId}, #{name}, #{titleWords}, #{imageWords}, #{detectPhones}, #{createBy}, now())
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            owner_id,
+            name,
+            title_words,
+            image_words,
+            detect_phones,
+            create_by,
+            create_time,
+        </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            #{ownerId},
+            #{name},
+            #{titleWords},
+            #{imageWords},
+            #{detectPhones},
+            #{createBy},
+            now(),
+        </trim>
     </insert>
+
     <update id="updateProductWordLibrary" parameterType="ProductWordLibrary">
-        update product_word_library set name = #{name}, title_words = #{titleWords},
-        image_words = #{imageWords}, detect_phones = #{detectPhones}, update_by = #{updateBy}, update_time = now()
-        where id = #{id} and owner_id = #{ownerId}
+        update product_word_library
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="name != null and name != ''">name = #{name},</if>
+            <if test="titleWords != null">title_words = #{titleWords},</if>
+            <if test="imageWords != null">image_words = #{imageWords},</if>
+            <if test="detectPhones != null">detect_phones = #{detectPhones},</if>
+            update_by = #{updateBy},
+            update_time = now(),
+        </trim>
+        where id = #{id}
     </update>
-    <delete id="deleteProductWordLibraryById" parameterType="long">
-        delete from product_word_library where id = #{id} and owner_id = #{ownerId}
+
+    <delete id="deleteProductWordLibraryById" parameterType="ProductWordLibrary">
+        delete from product_word_library where id = #{id}
     </delete>
+
 </mapper>

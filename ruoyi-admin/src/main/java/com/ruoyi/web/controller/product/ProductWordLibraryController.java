@@ -33,7 +33,7 @@ public class ProductWordLibraryController extends BaseController
     private IProductWordLibraryService productWordLibraryService;
 
     /**
-     * 查询当前登录用户的过滤词库列表
+     * 查询过滤词库列表
      */
     @PreAuthorize("@ss.hasPermi('product:wordLibrary:list')")
     @GetMapping("/list")
@@ -49,9 +49,9 @@ public class ProductWordLibraryController extends BaseController
      */
     @PreAuthorize("@ss.hasPermi('product:scan:use')")
     @GetMapping("/options")
-    public AjaxResult options()
+    public AjaxResult options(ProductWordLibrary productWordLibrary)
     {
-        return success(productWordLibraryService.selectProductWordLibraryList(new ProductWordLibrary()));
+        return success(productWordLibraryService.selectProductWordLibraryList(productWordLibrary));
     }
 
     /**
@@ -61,7 +61,7 @@ public class ProductWordLibraryController extends BaseController
     @GetMapping(value = "/{id}")
     public AjaxResult getInfo(@PathVariable("id") Long id)
     {
-        return success(productWordLibraryService.selectProductWordLibraryById(getUserId(), id));
+        return success(productWordLibraryService.selectProductWordLibraryById(id));
     }
 
     /**
@@ -72,7 +72,7 @@ public class ProductWordLibraryController extends BaseController
     @PostMapping
     public AjaxResult add(@RequestBody ProductWordLibrary productWordLibrary)
     {
-        return toAjax(productWordLibraryService.insertProductWordLibrary(getUserId(), getUsername(), productWordLibrary));
+        return toAjax(productWordLibraryService.insertProductWordLibrary(productWordLibrary));
     }
 
     /**
@@ -83,7 +83,7 @@ public class ProductWordLibraryController extends BaseController
     @PutMapping
     public AjaxResult edit(@RequestBody ProductWordLibrary productWordLibrary)
     {
-        return toAjax(productWordLibraryService.updateProductWordLibrary(getUserId(), getUsername(), productWordLibrary));
+        return toAjax(productWordLibraryService.updateProductWordLibrary(productWordLibrary));
     }
 
     /**
@@ -91,9 +91,9 @@ public class ProductWordLibraryController extends BaseController
      */
     @PreAuthorize("@ss.hasPermi('product:wordLibrary:remove')")
     @Log(title = "过滤词库", businessType = BusinessType.DELETE)
-    @DeleteMapping("/{id}")
-    public AjaxResult remove(@PathVariable Long id)
+    @DeleteMapping
+    public AjaxResult remove(@RequestBody ProductWordLibrary productWordLibrary)
     {
-        return toAjax(productWordLibraryService.deleteProductWordLibraryById(getUserId(), id));
+        return toAjax(productWordLibraryService.deleteProductWordLibraryById(productWordLibrary));
     }
 }

@@ -17,7 +17,7 @@ public class ProductWordLibrary extends BaseEntity
     /** 词库主键 */
     private Long id;
 
-    /** 所属登录用户ID，词库不跨用户共享 */
+    /** 创建词库时记录的用户ID，当前阶段仅作为审计字段 */
     private Long ownerId;
 
     /** 用户在页面选择时看到的名称，单个用户内唯一 */

@@ -14,7 +14,7 @@ import com.ruoyi.system.service.product.ScanRules;
 /**
  * 过滤词库Service业务层处理
  *
- * 归属用户由登录态传入，所有查询和修改都通过 ownerId 做数据隔离。
+ * 当前阶段词库作为全局配置使用，暂不按用户做数据隔离；后续统一权限模块接入后再补充。
  * 保存前复用商品检测规则，确保管理页和检测页的拆词、数量限制一致。
  *
  * @author product-filter
@@ -35,22 +35,19 @@ public class ProductWordLibraryServiceImpl implements IProductWordLibraryService
     @Override
     public List<ProductWordLibrary> selectProductWordLibraryList(ProductWordLibrary productWordLibrary)
     {
-        // 所属用户以登录态为准，覆盖请求中的用户ID，防止查询他人词库。
-        productWordLibrary.setOwnerId(SecurityUtils.getUserId());
         return productWordLibraryMapper.selectProductWordLibraryList(productWordLibrary);
     }
 
     /**
      * 通过词库ID查询词库信息
      *
-     * @param ownerId 当前登录用户ID
      * @param id 词库ID
      * @return 词库信息
      */
     @Override
-    public ProductWordLibrary selectProductWordLibraryById(Long ownerId, Long id)
+    public ProductWordLibrary selectProductWordLibraryById(Long id)
     {
-        ProductWordLibrary productWordLibrary = productWordLibraryMapper.selectProductWordLibraryById(ownerId, id);
+        ProductWordLibrary productWordLibrary = productWordLibraryMapper.selectProductWordLibraryById(id);
         if (productWordLibrary == null)
         {
             throw new ServiceException("词库不存在或已删除");
@@ -61,18 +58,16 @@ public class ProductWordLibraryServiceImpl implements IProductWordLibraryService
     /**
      * 新增保存过滤词库
      *
-     * @param ownerId 当前登录用户ID
-     * @param username 当前登录用户名
      * @param productWordLibrary 词库信息
      * @return 结果
      */
     @Override
-    public int insertProductWordLibrary(Long ownerId, String username, ProductWordLibrary productWordLibrary)
+    public int insertProductWordLibrary(ProductWordLibrary productWordLibrary)
     {
         validate(productWordLibrary);
         productWordLibrary.setId(null);
-        productWordLibrary.setOwnerId(ownerId);
-        productWordLibrary.setCreateBy(username);
+        productWordLibrary.setOwnerId(SecurityUtils.getUserId());
+        productWordLibrary.setCreateBy(SecurityUtils.getUsername());
         try
         {
             return productWordLibraryMapper.insertProductWordLibrary(productWordLibrary);
@@ -86,18 +81,15 @@ public class ProductWordLibraryServiceImpl implements IProductWordLibraryService
     /**
      * 修改保存过滤词库
      *
-     * @param ownerId 当前登录用户ID
-     * @param username 当前登录用户名
      * @param productWordLibrary 词库信息
      * @return 结果
      */
     @Override
-    public int updateProductWordLibrary(Long ownerId, String username, ProductWordLibrary productWordLibrary)
+    public int updateProductWordLibrary(ProductWordLibrary productWordLibrary)
     {
         validate(productWordLibrary);
-        selectProductWordLibraryById(ownerId, productWordLibrary.getId());
-        productWordLibrary.setOwnerId(ownerId);
-        productWordLibrary.setUpdateBy(username);
+        selectProductWordLibraryById(productWordLibrary.getId());
+        productWordLibrary.setUpdateBy(SecurityUtils.getUsername());
         try
         {
             return productWordLibraryMapper.updateProductWordLibrary(productWordLibrary);
@@ -111,15 +103,14 @@ public class ProductWordLibraryServiceImpl implements IProductWordLibraryService
     /**
      * 删除过滤词库
      *
-     * @param ownerId 当前登录用户ID
-     * @param id 词库ID
+     * @param productWordLibrary 词库信息，包含待删除的主键
      * @return 结果
      */
     @Override
-    public int deleteProductWordLibraryById(Long ownerId, Long id)
+    public int deleteProductWordLibraryById(ProductWordLibrary productWordLibrary)
     {
-        selectProductWordLibraryById(ownerId, id);
-        return productWordLibraryMapper.deleteProductWordLibraryById(ownerId, id);
+        selectProductWordLibraryById(productWordLibrary.getId());
+        return productWordLibraryMapper.deleteProductWordLibraryById(productWordLibrary);
     }
 
     /**
