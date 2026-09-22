@@ -5,6 +5,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import com.ruoyi.common.exception.ServiceException;
+import com.ruoyi.common.utils.SecurityUtils;
 import com.ruoyi.system.domain.ProductWordLibrary;
 import com.ruoyi.system.mapper.ProductWordLibraryMapper;
 import com.ruoyi.system.service.IProductWordLibraryService;
@@ -28,14 +29,15 @@ public class ProductWordLibraryServiceImpl implements IProductWordLibraryService
     /**
      * 查询过滤词库集合
      *
-     * @param ownerId 当前登录用户ID
-     * @param name 词库名称，可为空
+     * @param productWordLibrary 过滤词库查询条件
      * @return 词库集合
      */
     @Override
-    public List<ProductWordLibrary> selectProductWordLibraryList(Long ownerId, String name)
+    public List<ProductWordLibrary> selectProductWordLibraryList(ProductWordLibrary productWordLibrary)
     {
-        return productWordLibraryMapper.selectProductWordLibraryList(ownerId, name);
+        // 所属用户以登录态为准，覆盖请求中的用户ID，防止查询他人词库。
+        productWordLibrary.setOwnerId(SecurityUtils.getUserId());
+        return productWordLibraryMapper.selectProductWordLibraryList(productWordLibrary);
     }
 
     /**

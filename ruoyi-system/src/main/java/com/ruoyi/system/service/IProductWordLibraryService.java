@@ -14,11 +14,10 @@ public interface IProductWordLibraryService
     /**
      * 查询过滤词库集合
      *
-     * @param ownerId 当前登录用户ID
-     * @param name 词库名称，可为空
+     * @param productWordLibrary 过滤词库查询条件
      * @return 词库集合
      */
-    public List<ProductWordLibrary> selectProductWordLibraryList(Long ownerId, String name);
+    public List<ProductWordLibrary> selectProductWordLibraryList(ProductWordLibrary productWordLibrary);
 
     /**
      * 通过词库ID查询词库信息

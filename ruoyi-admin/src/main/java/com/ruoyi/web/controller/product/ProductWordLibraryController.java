@@ -10,7 +10,6 @@ import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import com.ruoyi.common.annotation.Log;
 import com.ruoyi.common.core.controller.BaseController;
@@ -38,10 +37,10 @@ public class ProductWordLibraryController extends BaseController
      */
     @PreAuthorize("@ss.hasPermi('product:wordLibrary:list')")
     @GetMapping("/list")
-    public TableDataInfo list(@RequestParam(required = false) String name)
+    public TableDataInfo list(ProductWordLibrary productWordLibrary)
     {
         startPage();
-        List<ProductWordLibrary> list = productWordLibraryService.selectProductWordLibraryList(getUserId(), name);
+        List<ProductWordLibrary> list = productWordLibraryService.selectProductWordLibraryList(productWordLibrary);
         return getDataTable(list);
     }
 
@@ -52,7 +51,7 @@ public class ProductWordLibraryController extends BaseController
     @GetMapping("/options")
     public AjaxResult options()
     {
-        return success(productWordLibraryService.selectProductWordLibraryList(getUserId(), null));
+        return success(productWordLibraryService.selectProductWordLibraryList(new ProductWordLibrary()));
     }
 
     /**

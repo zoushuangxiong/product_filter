@@ -14,7 +14,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
         <result property="updateTime"    column="update_time"    />
     </resultMap>
     <!-- 列表和下拉框只返回摘要，避免一次传输所有词库正文。 -->
-    <select id="selectProductWordLibraryList" resultMap="ProductWordLibraryResult">
+    <select id="selectProductWordLibraryList" parameterType="ProductWordLibrary" resultMap="ProductWordLibraryResult">
         select id, name, detect_phones, create_time, update_time
         from product_word_library
         <where>

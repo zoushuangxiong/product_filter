@@ -15,12 +15,10 @@ public interface ProductWordLibraryMapper
     /**
      * 查询过滤词库列表
      *
-     * @param ownerId 所属用户ID
-     * @param name 过滤词库名称
+     * @param productWordLibrary 过滤词库查询条件
      * @return 过滤词库集合
      */
-    public List<ProductWordLibrary> selectProductWordLibraryList(@Param("ownerId") Long ownerId,
-                                                                  @Param("name") String name);
+    public List<ProductWordLibrary> selectProductWordLibraryList(ProductWordLibrary productWordLibrary);
 
     /**
      * 查询过滤词库
