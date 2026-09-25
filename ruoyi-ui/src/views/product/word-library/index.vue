@@ -14,7 +14,6 @@
       <el-table-column label="创建时间" prop="createTime" width="180"/>
       <el-table-column label="修改时间" prop="updateTime" width="180"/>
       <el-table-column label="操作" width="200"><template #default="{ row }">
-        <el-button link type="primary" :disabled="loading" @click="openEdit(row, true)">查看</el-button>
         <el-button v-hasPermi="['product:wordLibrary:edit']" link type="primary" :disabled="loading" @click="openEdit(row)">编辑</el-button>
         <el-button v-hasPermi="['product:wordLibrary:remove']" link type="danger" :disabled="loading" @click="remove(row)">删除</el-button>
       </template></el-table-column>

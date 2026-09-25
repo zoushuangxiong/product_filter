@@ -1,4 +1,4 @@
-# 商品筛选系统前端
+# 商品过滤系统前端
 
 基于 Vue 3、Vite、Element Plus 和 Pinia 的管理界面。
 

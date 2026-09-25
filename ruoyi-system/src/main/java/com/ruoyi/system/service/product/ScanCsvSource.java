@@ -19,6 +19,30 @@ final class ScanCsvSource
                     .map(r -> ScanRules.itemId(r.cells().get(column).trim(), platform)).toList();
         }
     }
+    /** 按商品ID收集导入标题；保留重复商品的不同标题，任一标题命中即可结束检测。 */
+    static java.util.Map<String, List<String>> titles(String text, String platform)
+    {
+        java.util.Map<String, List<String>> titles = new java.util.HashMap<>();
+        if (text == null || text.isBlank()) return titles;
+        Source source = parse(text);
+        if (!source.header()) return titles;
+        List<String> headers = source.rows().get(0).cells();
+        int titleColumn = -1;
+        for (int i = 0; i < headers.size(); i++)
+            if (Set.of("商品标题", "标题", "商品名称", "title").contains(headers.get(i).trim()))
+            { titleColumn = i; break; }
+        if (titleColumn < 0) return titles;
+        for (Row row : source.rows().subList(1, source.rows().size()))
+        {
+            if (row.raw().isBlank() || row.cells().size() <= titleColumn) continue;
+            String title = row.cells().get(titleColumn).trim();
+            if (title.isEmpty()) continue;
+            String id = ScanRules.itemId(row.cells().get(source.column()).trim(), platform);
+            titles.computeIfAbsent(id, key -> new ArrayList<>()).add(title);
+        }
+        return titles;
+    }
+
     /** 支持 BOM、带引号的逗号/换行及双引号转义；识别商品列，供导入校验与导出复用。 */
     static Source parse(String text)
     {
@@ -52,7 +76,7 @@ final class ScanCsvSource
         if (rows.isEmpty()) throw new ServiceException("CSV 没有商品数据");
         int column = 0; boolean header = false;
         for (int i = 0; i < rows.get(0).cells().size(); i++)
-            if (Set.of("商品ID", "商品id", "itemId", "item_id", "商品链接").contains(rows.get(0).cells().get(i).trim()))
+            if (Set.of("商品ID", "商品id", "itemId", "item_id", "商品链接", "商品链接（必填）").contains(rows.get(0).cells().get(i).trim()))
             { column = i; header = true; break; }
         for (Row row : rows)
             if (!row.raw().isBlank() && row.cells().size() <= column) throw new ServiceException("CSV 数据行缺少商品列");

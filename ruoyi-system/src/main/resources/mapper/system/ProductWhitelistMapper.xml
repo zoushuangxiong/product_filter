@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.ProductWhitelistMapper">
+
+    <resultMap type="ProductWhitelist" id="ProductWhitelistResult">
+        <id     property="id"           column="id"            />
+        <result property="filterWord"   column="filter_word"   />
+        <result property="wordKey"      column="word_key"      />
+        <result property="matchType"    column="match_type"    />
+        <result property="matchContent" column="match_content" />
+        <result property="matchCount"   column="match_count"   />
+        <result property="status"       column="status"        />
+        <result property="createBy"     column="create_by"     />
+        <result property="createTime"   column="create_time"   />
+        <result property="updateBy"     column="update_by"     />
+        <result property="updateTime"   column="update_time"   />
+    </resultMap>
+
+    <sql id="selectProductWhitelistVo">
+        select id, filter_word, word_key, match_type, match_content, match_count,
+               status, create_by, create_time, update_by, update_time
+        from product_whitelist
+    </sql>
+
+    <select id="selectProductWhitelistList" parameterType="ProductWhitelist" resultMap="ProductWhitelistResult">
+        select id, filter_word, match_type, substring(match_content, 1, 161) as match_content,
+               match_count, status, create_by, create_time, update_by, update_time
+        from product_whitelist
+        <where>
+            <if test="filterWord != null and filterWord.trim() != ''">and filter_word like concat('%', #{filterWord}, '%')</if>
+            <if test="matchContent != null and matchContent.trim() != ''">and match_content like concat('%', #{matchContent}, '%')</if>
+        </where>
+        order by id desc
+    </select>
+
+    <select id="selectEnabledProductWhitelistList" resultMap="ProductWhitelistResult">
+        <include refid="selectProductWhitelistVo"/>
+        where status = '0'
+        order by id
+    </select>
+
+    <select id="selectProductWhitelistById" parameterType="Long" resultMap="ProductWhitelistResult">
+        <include refid="selectProductWhitelistVo"/>
+        where id = #{id}
+    </select>
+
+    <select id="selectProductWhitelistByKey" parameterType="ProductWhitelist" resultMap="ProductWhitelistResult">
+        <include refid="selectProductWhitelistVo"/>
+        where word_key = #{wordKey} and match_type = #{matchType}
+    </select>
+
+    <select id="selectProductWhitelistForUpdate" parameterType="Long" resultMap="ProductWhitelistResult">
+        <include refid="selectProductWhitelistVo"/>
+        where id = #{id} for update
+    </select>
+
+    <insert id="insertProductWhitelist" parameterType="ProductWhitelist" useGeneratedKeys="true" keyProperty="id">
+        insert into product_whitelist
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="filterWord != null">filter_word,</if>
+            <if test="wordKey != null">word_key,</if>
+            <if test="matchType != null">match_type,</if>
+            <if test="matchContent != null">match_content,</if>
+            <if test="matchCount != null">match_count,</if>
+            <if test="status != null">status,</if>
+            <if test="createBy != null">create_by,</if>
+            <if test="createTime != null">create_time,</if>
+        </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="filterWord != null">#{filterWord},</if>
+            <if test="wordKey != null">#{wordKey},</if>
+            <if test="matchType != null">#{matchType},</if>
+            <if test="matchContent != null">#{matchContent},</if>
+            <if test="matchCount != null">#{matchCount},</if>
+            <if test="status != null">#{status},</if>
+            <if test="createBy != null">#{createBy},</if>
+            <if test="createTime != null">#{createTime},</if>
+        </trim>
+    </insert>
+
+    <update id="updateProductWhitelist" parameterType="ProductWhitelist">
+        update product_whitelist
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="matchContent != null">match_content = #{matchContent},</if>
+            <if test="matchCount != null">match_count = #{matchCount},</if>
+            <if test="status != null">status = #{status},</if>
+            update_by = #{updateBy},
+            update_time = #{updateTime},
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteProductWhitelistById" parameterType="Long">
+        delete from product_whitelist where id = #{id}
+    </delete>
+</mapper>

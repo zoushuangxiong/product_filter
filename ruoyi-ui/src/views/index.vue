@@ -2,7 +2,7 @@
   <div class="app-container home">
     <el-card shadow="never">
       <h1>{{ title }}</h1>
-      <p>欢迎使用商品筛选系统，请从导航菜单选择需要的功能。</p>
+      <p>欢迎使用{{ title }}，请从导航菜单选择需要的功能。</p>
     </el-card>
   </div>
 </template>

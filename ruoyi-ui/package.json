@@ -1,7 +1,7 @@
 {
   "name": "product-filter-ui",
   "version": "3.9.2",
-  "description": "商品筛选系统前端",
+  "description": "商品过滤系统前端",
   "license": "MIT",
   "type": "module",
   "scripts": {

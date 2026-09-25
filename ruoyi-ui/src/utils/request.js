@@ -109,6 +109,8 @@ service.interceptors.response.use(res => {
     }
   },
   error => {
+    // 轮询自行处理临时失败和重试，避免反复弹出错误提示。
+    if (error.config?.silentError) return Promise.reject(error)
     console.log('err' + error)
     let { message } = error
     if (message == "Network Error") {

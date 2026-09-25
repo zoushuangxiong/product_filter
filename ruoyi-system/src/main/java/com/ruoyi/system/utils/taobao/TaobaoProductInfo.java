@@ -11,7 +11,7 @@ public final class TaobaoProductInfo
     private final String categoryName, shopUrl, sales, commentCount;
     private final List<String> detailImages;
 
-    TaobaoProductInfo(String title, List<String> mainImages,
+    public TaobaoProductInfo(String title, List<String> mainImages,
             String priceText, List<String> detailImages,
             String categoryName, String shopUrl, String sales, String commentCount)
     {

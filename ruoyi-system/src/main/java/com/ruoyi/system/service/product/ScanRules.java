@@ -101,6 +101,47 @@ public final class ScanRules
         return List.copyOf(hits);
     }
 
+    /** 每个任务只规范化一次词库，保留原词和顺序以维持命中展示与标题提前结束语义。 */
+    public static PreparedWords prepare(String text) { return new PreparedWords(words(text)); }
+
+    public static final class PreparedWords
+    {
+        private final List<String> originals;
+        private final List<String> normalized;
+
+        private PreparedWords(List<String> words)
+        {
+            originals = List.copyOf(words);
+            normalized = words.stream().map(ScanRules::normalize).toList();
+        }
+
+        /** 标题只取首个命中；图片保留全部命中及手机号。 */
+        public List<String> match(String text, boolean phones, boolean firstOnly)
+        {
+            return match(text, phones, firstOnly, null);
+        }
+
+        /** 过滤词命中后逐位置校验白名单；仅全部位置被放行时才忽略该词。 */
+        public List<String> match(String text, boolean phones, boolean firstOnly, ScanWhitelist whitelist)
+        {
+            String value = normalize(text);
+            Set<String> hits = new LinkedHashSet<>();
+            for (int i = 0; i < normalized.size(); i++)
+            {
+                if (!value.contains(normalized.get(i))) continue;
+                if (whitelist != null && !whitelist.hasUnallowedHit(value, normalized.get(i))) continue;
+                if (firstOnly) return List.of(originals.get(i));
+                hits.add(originals.get(i));
+            }
+            if (phones)
+            {
+                var matcher = PHONE.matcher(value);
+                while (matcher.find()) hits.add("手机号:" + matcher.group());
+            }
+            return List.copyOf(hits);
+        }
+    }
+
     private static String normalize(String s)
     {
         return Normalizer.normalize(s == null ? "" : s, Normalizer.Form.NFKC).toLowerCase(Locale.ROOT);

@@ -13,6 +13,7 @@ const usePermissionStore = defineStore(
   'permission',
   {
     state: () => ({
+      productScanPath: '',
       routes: [],
       addRoutes: [],
       defaultRoutes: [],
@@ -38,6 +39,7 @@ const usePermissionStore = defineStore(
           // 向后端请求路由数据
           getRouters().then(res => {
             const projectRoutes = filterProjectRoutes(res.data)
+            this.productScanPath = findProductScanPath(projectRoutes)
             const sdata = JSON.parse(JSON.stringify(projectRoutes))
             const rdata = JSON.parse(JSON.stringify(projectRoutes))
             const defaultData = JSON.parse(JSON.stringify(projectRoutes))
@@ -46,23 +48,27 @@ const usePermissionStore = defineStore(
             const defaultRoutes = filterAsyncRouter(defaultData)
             const asyncRoutes = filterDynamicRoutes(dynamicRoutes)
             asyncRoutes.forEach(route => { router.addRoute(route) })
-            // 数据库菜单部署后优先使用数据库路由；未部署时使用本地备用入口，避免菜单消失。
-            const dbPaths = new Set()
-            function collectPaths(routes) {
-              routes.forEach(route => { if (route.path) dbPaths.add(route.path.startsWith('/') ? route.path : `/${route.path}`); if (route.children) collectPaths(route.children) })
-            }
-            collectPaths(sidebarRoutes)
-            const visibleLocalRoutes = asyncRoutes.filter(route => !route.hidden && !dbPaths.has(route.path))
-            this.setRoutes(rewriteRoutes.concat(visibleLocalRoutes))
-            this.setSidebarRouters(constantRoutes.concat(sidebarRoutes, visibleLocalRoutes))
-            this.setDefaultRoutes(sidebarRoutes.concat(visibleLocalRoutes))
-            this.setTopbarRoutes(defaultRoutes.concat(visibleLocalRoutes))
+            this.setRoutes(rewriteRoutes)
+            this.setSidebarRouters(constantRoutes.concat(sidebarRoutes))
+            this.setDefaultRoutes(sidebarRoutes)
+            this.setTopbarRoutes(defaultRoutes)
             resolve(rewriteRoutes)
           })
         })
       }
     }
   })
+
+// 使用数据库菜单的实际路径，兼容顶层菜单和多级目录。
+function findProductScanPath(routes, parentPath = '') {
+  for (const route of routes) {
+    const path = route.path.startsWith('/') ? route.path : `${parentPath}/${route.path}`.replace(/\/+/g, '/')
+    if (route.component === 'product/scan/index') return path
+    const childPath = findProductScanPath(route.children || [], path)
+    if (childPath) return childPath
+  }
+  return ''
+}
 
 // 遍历后台传来的路由字符串，转换为组件对象
 function filterAsyncRouter(asyncRouterMap, lastRouter = false, type = false) {

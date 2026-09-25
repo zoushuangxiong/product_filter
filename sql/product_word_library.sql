@@ -29,10 +29,6 @@ SET parent.visible = '1', child.parent_id = 0, child.path = 'product', child.ord
     child.menu_name = '商品检测', child.icon = 'shopping'
 WHERE parent.menu_type = 'M' AND parent.perms = 'product:scan:use';
 INSERT INTO sys_menu (menu_name, parent_id, order_num, path, component, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time)
-SELECT '已检测过滤', 0, 6, 'checked-filter', 'product/checked-filter/index', 1, 1, 'C', '0', '0', 'product:scan:use', 'checkbox', 'admin', NOW()
-WHERE NOT EXISTS (SELECT 1 FROM sys_menu WHERE component = 'product/checked-filter/index');
-
-INSERT INTO sys_menu (menu_name, parent_id, order_num, path, component, is_frame, is_cache, menu_type, visible, status, perms, icon, create_by, create_time)
 SELECT '过滤词库', 0, 5, 'word-library', 'product/word-library/index', 1, 1, 'C', '0', '0', 'product:wordLibrary:list', 'list', 'admin', NOW()
 WHERE NOT EXISTS (SELECT 1 FROM sys_menu WHERE perms = 'product:wordLibrary:list');
 SET @library_menu = (SELECT menu_id FROM sys_menu WHERE perms = 'product:wordLibrary:list' LIMIT 1);

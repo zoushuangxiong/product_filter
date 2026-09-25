@@ -1,0 +1,126 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper
+PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+"http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="com.ruoyi.system.mapper.ProductExecutionListMapper">
+
+    <resultMap type="ProductExecutionList" id="ProductExecutionListResult">
+        <result property="id"    column="id"    />
+        <result property="platform"    column="platform"    />
+        <result property="fileName"    column="file_name"    />
+        <result property="productCount"    column="product_count"    />
+        <result property="recordCount"    column="record_count"    />
+        <result property="filePath"    column="file_path"    />
+        <result property="filteredFilePath" column="filtered_file_path" />
+        <result property="filteredRecordCount" column="filtered_record_count" />
+        <result property="filteredProductCount" column="filtered_product_count" />
+        <result property="filteredTime" column="filtered_time" />
+        <result property="filterVersion" column="filter_version" />
+        <result property="filterOwnerId" column="owner_id" />
+        <result property="remark"    column="remark"    />
+        <result property="createBy"    column="create_by"    />
+        <result property="createTime"    column="create_time"    />
+        <result property="updateBy"    column="update_by"    />
+        <result property="updateTime"    column="update_time"    />
+    </resultMap>
+
+    <!-- 列表只查询元信息，避免分页时读取整份表格。 -->
+    <sql id="selectProductExecutionListVo">
+        select e.id, e.platform, e.file_name, e.file_path, e.product_count, e.record_count, e.remark, e.create_by, e.create_time, e.update_by, e.update_time, f.filtered_record_count, f.filtered_product_count, f.filtered_time, f.filter_version
+        from product_execution_list e
+        left join product_execution_list_filter f on f.list_id = e.id and f.owner_id = #{params.ownerId}
+    </sql>
+
+    <select id="selectProductExecutionListList" parameterType="ProductExecutionList" resultMap="ProductExecutionListResult">
+        <include refid="selectProductExecutionListVo"/>
+        <where>
+            <if test="fileName != null and fileName != ''"> and e.file_name like concat('%', #{fileName}, '%')</if>
+            <if test="platform != null and platform != ''"> and e.platform = #{platform}</if>
+        </where>
+        order by e.id desc
+    </select>
+
+    <select id="selectProductExecutionListById" parameterType="Long" resultMap="ProductExecutionListResult">
+        select id, platform, file_name, product_count, record_count, file_path, remark, create_by, create_time, update_by, update_time
+        from product_execution_list where id = #{id}
+    </select>
+
+    <select id="selectProductExecutionListIdByFileName" parameterType="String" resultType="Long">
+        select id from product_execution_list where file_name = #{fileName}
+    </select>
+
+    <insert id="insertProductExecutionList" parameterType="ProductExecutionList" useGeneratedKeys="true" keyProperty="id">
+        insert into product_execution_list
+        <trim prefix="(" suffix=")" suffixOverrides=",">
+            <if test="platform != null">platform,</if>
+            <if test="fileName != null">file_name,</if>
+            <if test="productCount != null">product_count,</if>
+            <if test="recordCount != null">record_count,</if>
+            <if test="filePath != null">file_path,</if>
+            <if test="remark != null">remark,</if>
+            <if test="createBy != null">create_by,</if>
+            <if test="createTime != null">create_time,</if>
+            <if test="updateBy != null">update_by,</if>
+            <if test="updateTime != null">update_time,</if>
+        </trim>
+        <trim prefix="values (" suffix=")" suffixOverrides=",">
+            <if test="platform != null">#{platform},</if>
+            <if test="fileName != null">#{fileName},</if>
+            <if test="productCount != null">#{productCount},</if>
+            <if test="recordCount != null">#{recordCount},</if>
+            <if test="filePath != null">#{filePath},</if>
+            <if test="remark != null">#{remark},</if>
+            <if test="createBy != null">#{createBy},</if>
+            <if test="createTime != null">#{createTime},</if>
+            <if test="updateBy != null">#{updateBy},</if>
+            <if test="updateTime != null">#{updateTime},</if>
+        </trim>
+    </insert>
+
+    <update id="updateProductExecutionList" parameterType="ProductExecutionList">
+        update product_execution_list
+        <trim prefix="SET" suffixOverrides=",">
+            <if test="remark != null">remark = #{remark},</if>
+            <if test="updateBy != null">update_by = #{updateBy},</if>
+            <if test="updateTime != null">update_time = #{updateTime},</if>
+        </trim>
+        where id = #{id}
+    </update>
+
+    <delete id="deleteProductExecutionListById" parameterType="Long">
+        delete from product_execution_list where id = #{id}
+    </delete>
+
+    <delete id="deleteProductExecutionListByIds" parameterType="Long">
+        delete from product_execution_list where id in
+        <foreach item="id" collection="array" open="(" separator="," close=")">
+            #{id}
+        </foreach>
+    </delete>
+    <!-- 串行化同一清单的过滤、读取和删除，防止文件在创建任务时被替换或删除。 -->
+    <select id="selectProductExecutionListForUpdate" parameterType="Long" resultMap="ProductExecutionListResult">
+        select id, platform, file_name, file_path, product_count, record_count, remark
+        from product_execution_list where id = #{id} for update
+    </select>
+
+    <select id="selectProductExecutionListFilter" parameterType="ProductExecutionList" resultMap="ProductExecutionListResult">
+        select list_id as id, owner_id, filtered_file_path, filtered_record_count, filtered_product_count, filtered_time, filter_version
+        from product_execution_list_filter where list_id = #{id} and owner_id = #{filterOwnerId}
+    </select>
+
+    <insert id="saveProductExecutionListFilter" parameterType="ProductExecutionList">
+        insert into product_execution_list_filter
+            (list_id, owner_id, filtered_file_path, filtered_record_count, filtered_product_count, filtered_time, filter_version)
+        values (#{id}, #{filterOwnerId}, #{filteredFilePath}, #{filteredRecordCount}, #{filteredProductCount}, #{filteredTime}, #{filterVersion})
+        on duplicate key update filtered_file_path = values(filtered_file_path), filtered_record_count = values(filtered_record_count),
+            filtered_product_count = values(filtered_product_count), filtered_time = values(filtered_time), filter_version = values(filter_version)
+    </insert>
+
+    <select id="selectProductExecutionListFilterPaths" parameterType="Long" resultType="String">
+        select filtered_file_path from product_execution_list_filter where list_id = #{id}
+    </select>
+
+    <delete id="deleteProductExecutionListFilters" parameterType="Long">
+        delete from product_execution_list_filter where list_id = #{id}
+    </delete>
+</mapper>
