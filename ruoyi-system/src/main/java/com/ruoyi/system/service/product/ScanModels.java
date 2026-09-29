@@ -13,6 +13,8 @@ public final class ScanModels
     {
         /** 本次执行的清单ID。 */
         public Long executionListId;
+        /** 选用的过滤词库ID；手动填写时为空，重检据此读取最新词库。 */
+        public Long wordLibraryId;
         /** ALL：完全执行；FILTERED：执行已保存的过滤结果。 */
         public String executionMode;
         /** 过滤结果版本，防止页面旧统计对应到更新后的文件。 */
@@ -75,6 +77,8 @@ public final class ScanModels
         public List<String> recheckItemIds = new ArrayList<>();
         /** 本轮重检时最新的白名单快照，不覆盖其他商品原任务的规则。 */
         public List<WhitelistRule> recheckWhitelist;
+        /** 本轮命中项重检的过滤规则快照，继续任务时沿用。 */
+        public Request recheckRules;
     }
 
     /** 分页查询响应；统计覆盖整个任务，products 只包含当前页。 */

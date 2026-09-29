@@ -36,7 +36,7 @@
       </el-form>
       <p class="word-hint">按换行分隔，每行一项；逗号、顿号和空格不会分隔内容。重复项自动合并，不区分大小写。每项最多200个字符，每条最多10000项。</p>
       <p v-if="form.matchType === 'UNIT'" class="muted">计量单位中，每个 # 表示一位数字，例如 ##ML 表示两位数字加 ML，###ML 表示三位数字加 ML。</p>
-      <p v-if="form.matchType === 'WORD'" class="muted">中文按连续文字整体匹配。例如只配置“完美”，不会放行“不完美”或“追求完美”；需要放行的完整内容请单独填写。</p>
+      <p v-if="form.matchType === 'WORD'" class="muted">词汇按包含匹配，前后可有其他字符，不区分大小写。例如 Cotton 可放行 Cottonfield 中的 TT，“完美”可放行“不完美”中的“完美”；其他位置的命中仍单独判断。</p>
       <template #footer><el-button type="primary" :loading="saving" @click="submitForm">确 定</el-button><el-button :disabled="saving" @click="open = false">取 消</el-button></template>
     </el-dialog>
   </div>

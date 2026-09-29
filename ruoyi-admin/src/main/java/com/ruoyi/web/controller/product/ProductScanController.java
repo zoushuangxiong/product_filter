@@ -77,8 +77,13 @@ public class ProductScanController
 
     /** 按最新白名单重新检测整个任务中的命中商品。 */
     @PostMapping("/tasks/{id}/recheck-matched")
-    public AjaxResult recheckMatched(@PathVariable("id") String id)
-    { return AjaxResult.success(service.recheckMatched(SecurityUtils.getUserId(), id)); }
+    public AjaxResult recheckMatched(@PathVariable("id") String id, @RequestBody(required = false) ScanModels.Request request)
+    { return AjaxResult.success(service.recheckMatched(SecurityUtils.getUserId(), id, request)); }
+
+    /** 获取重检规则表单。 */
+    @GetMapping("/tasks/{id}/recheck-rules")
+    public AjaxResult recheckRules(@PathVariable("id") String id)
+    { return AjaxResult.success(service.recheckRules(SecurityUtils.getUserId(), id)); }
 
     /** 修改已完成任务的低置信度阈值并重新计算结果，不重新调用商品接口。 */
     @PostMapping("/tasks/{id}/confidence-threshold")

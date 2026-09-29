@@ -41,10 +41,12 @@
               <el-select v-model="selectedLibrary" filterable clearable placeholder="选择已保存的词库（可选）" :loading="librariesLoading" :disabled="active || busy || libraryApplying || !!selectedTask" class="library-select" @change="applyLibrary">
                 <el-option v-for="item in libraries" :key="item.id" :label="item.name" :value="item.id"/>
               </el-select>
-              <el-button :loading="librariesLoading" :disabled="active || busy || libraryApplying || !!selectedTask" icon="Refresh" @click="loadLibraries">刷新词库</el-button>
+              <el-button :loading="librariesLoading" :disabled="busy || libraryApplying" icon="Refresh" @click="refreshLibraries">刷新词库</el-button>
               <el-button v-hasPermi="['product:wordLibrary:list']" link type="primary" @click="$router.push('/word-library')">管理词库</el-button>
               </div>
-              <p class="muted">选择后自动填入规则，临时修改仅用于本次检测。清空选择会保留当前规则。</p>
+              <p v-if="selectedLibrary" class="muted">关联词库：<strong>{{ selectedLibraryName }}</strong><template v-if="job">；当前显示词库最新内容，已有结果不自动改变，点击“重新检测命中项”应用新规则。</template></p>
+              <p v-else-if="job" class="muted">此任务未记录词库关联；可在“重新检测命中项”中选择词库，提交后会保存关联。</p>
+              <p v-else class="muted">选择后自动填入规则，临时修改仅用于本次检测。清空选择会保留当前规则。</p>
               <p v-if="librariesError" class="error">词库加载失败，请点击“刷新词库”重试；也可手动填写过滤词。</p>
             </el-form-item>
             <el-row :gutter="22">
@@ -101,6 +103,19 @@
       </template><el-empty v-else-if="!resultsLoading && !historyLoading && !resultsError" description="还没有检测任务"/><div v-else-if="!job" class="results-placeholder"/>
       <p class="muted">“通过”表示符合本次检测规则，可导出通过项，不代表平台合规认证。识别失败、低置信度和未完成的商品不会自动通过。</p>
     </el-card>
+    <el-dialog v-model="recheckVisible" title="重新检测命中项" width="680px" style="max-width:95vw" :close-on-click-modal="false" :show-close="!recheckSubmitting" :close-on-press-escape="!recheckSubmitting">
+      <el-form label-position="top" :disabled="recheckSubmitting || recheckLoading">
+        <el-form-item label="过滤词库"><el-select v-model="recheckForm.wordLibraryId" filterable clearable placeholder="选择词库，或清空后手动填写" style="width:100%" @change="applyRecheckLibrary"><el-option v-for="item in libraries" :key="item.id" :label="item.name" :value="item.id" /></el-select></el-form-item>
+        <p class="muted">选择词库后，提交时从数据库读取该词库的最新过滤词；白名单也使用最新启用内容。</p>
+        <el-form-item label="标题过滤词"><el-input v-model="recheckForm.titleWords" type="textarea" :rows="5" :disabled="!!recheckForm.wordLibraryId" placeholder="每行一个过滤词" /></el-form-item>
+        <el-form-item label="图片文字过滤词"><el-input v-model="recheckForm.imageWords" type="textarea" :rows="5" :disabled="!!recheckForm.wordLibraryId" placeholder="每行一个过滤词" /></el-form-item>
+        <el-checkbox v-model="recheckForm.detectPhones" :disabled="!!recheckForm.wordLibraryId">检测手机号</el-checkbox>
+        <el-checkbox v-model="recheckForm.detectQrCodes" :disabled="!!recheckForm.wordLibraryId">检测二维码</el-checkbox>
+      </el-form>
+      <p class="muted">仅重新检测此任务的命中商品（包含其他页），替换这些商品的结果和人工处理，其他商品保持不变。优先复用商品缓存，无缓存时会调用接口并消耗额度。</p>
+      <template #footer><el-button :disabled="recheckSubmitting" @click="recheckVisible=false">取消</el-button><el-button type="primary" :loading="recheckSubmitting" :disabled="recheckLoading || !!recheckLoadError" @click="submitRecheck">开始重新检测</el-button></template>
+      <el-alert v-if="recheckLoadError" :title="recheckLoadError" type="error" :closable="false" />
+    </el-dialog>
     <el-dialog v-model="pictureVisible" :title="pictureTitle" width="90%" class="picture-dialog" append-to-body @closed="clearPicture">
       <div v-if="picture" class="picture-grid" v-loading="pictureLoading"><div class="preview-frame"><img v-if="previewUrl && !previewFailed" :src="previewUrl" alt="商品核查图片" referrerpolicy="no-referrer" @error="previewFailed=true"><el-empty v-if="previewFailed" description="原图暂时无法加载，请稍后再试"/><svg v-if="previewUrl && !previewFailed && picture.ocr" :viewBox="`0 0 ${picture.ocr.width} ${picture.ocr.height}`"><template v-for="(hit,index) in hits" :key="index"><polygon :points="hit.points" fill="none" stroke="white" stroke-width="4" vector-effect="non-scaling-stroke"/><polygon :points="hit.points" fill="none" :stroke="hit.matched ? '#e11d2e' : '#c87500'" stroke-width="2" vector-effect="non-scaling-stroke"/></template></svg><template v-if="previewUrl"><span v-for="(hit,index) in hits" :key="index" class="hit-marker" :style="{left: hit.left+'%', top: hit.top+'%', background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</span></template></div><div><p v-if="picture.error" class="error">图片读取或识别失败，请对照原图人工核查。</p><p v-if="picture.hits.length">命中词：{{ picture.hits.join('、') }}</p><p v-if="!pictureProductMatched && hasLowConfidence(picture)" class="muted">橙框标记识别置信度低于 {{ Math.round(confidenceThreshold * 100) }}% 的文字，请对照原图核查。</p><div v-for="(hit,index) in hits" :key="index" class="hit-line"><b :style="{background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</b><div>{{ hit.text }}<div class="muted">{{ hit.matched ? '命中词库' : '待核查文字' }}<span v-if="hit.lowConfidence"> · 低置信度 {{ (hit.score*100).toFixed(1) }}%</span></div></div></div><p v-if="!hits.length">文字位置暂不可用，请结合原图复核。</p></div></div>
     </el-dialog>
@@ -109,7 +124,7 @@
 </template>
 
 <script setup name="ProductScan">
-import { ref, reactive, computed, watch, nextTick, onMounted, onBeforeUnmount } from 'vue'
+import { ref, reactive, computed, watch, nextTick, onMounted, onActivated, onBeforeUnmount } from 'vue'
 import { useRoute } from 'vue-router'
 import usePermissionStore from '@/store/modules/permission'
 import { ElMessage, ElMessageBox } from 'element-plus'
@@ -124,6 +139,14 @@ const form = reactive({ titleWords:'', imageWords:'', detectPhones:false, detect
 const usage = reactive({ used: '—', limit: 5000 })
 let usageTimer, usageLoading = false
 const libraries = ref([]), selectedLibrary = ref(null), librariesLoading = ref(false), libraryApplying = ref(false), librariesError = ref(false)
+// 按关联 ID 展示名称，不根据过滤词正文猜测历史任务的词库。
+const selectedLibraryName = computed(() => libraries.value.find(item => String(item.id) === String(selectedLibrary.value))?.name || (libraryApplying.value ? '加载中…' : '名称暂不可用'))
+function rememberLibrary(data) {
+  const index = libraries.value.findIndex(item => String(item.id) === String(data.id))
+  if (index < 0) libraries.value.unshift(data)
+  else libraries.value.splice(index, 1, data)
+  selectedLibrary.value = data.id
+}
 async function loadUsage() {
   if (usageLoading) return
   usageLoading = true
@@ -140,18 +163,48 @@ async function loadLibraries() {
   catch { librariesError.value = true }
   finally { librariesLoading.value = false }
 }
+let librarySequence = 0
+function displayLibraryRules(data) {
+  Object.assign(form, {titleWords:data.titleWords || '', imageWords:data.imageWords || '', detectPhones:!!data.detectPhones, detectQrCodes:!!data.detectQrCodes})
+}
 async function applyLibrary(id) {
+  const seq = ++librarySequence
+  libraryApplying.value = false
   if (!id) return
   libraryApplying.value = true
   try {
     const { data } = await getLibrary(id)
-    // 只复制规则正文，临时编辑不会写回词库，也不会改变历史任务。
-    form.titleWords = data.titleWords
-    form.imageWords = data.imageWords
-    form.detectPhones = data.detectPhones
-    form.detectQrCodes = data.detectQrCodes
-  } catch { selectedLibrary.value = null }
-  finally { libraryApplying.value = false }
+    if (seq !== librarySequence || disposed) return
+    if (!data) throw Error('词库不存在')
+    rememberLibrary(data)
+    displayLibraryRules(data)
+    librariesError.value = false
+  } catch { if(seq === librarySequence) librariesError.value = true }
+  finally { if(seq === librarySequence) libraryApplying.value = false }
+}
+// 打开、切换或刷新任务时恢复词库关联并读取最新正文；进度轮询不重复请求词库。
+async function syncTaskLibrary(id) {
+  const seq = ++librarySequence
+  libraryApplying.value = true
+  try {
+    const {data:rules} = await api.getRecheckRules(id)
+    if(seq !== librarySequence || disposed || job.value?.id !== id) return
+    selectedLibrary.value = rules.wordLibraryId || null
+    if (rules.wordLibraryId) {
+      const {data} = await getLibrary(rules.wordLibraryId)
+      if(seq !== librarySequence || disposed || job.value?.id !== id) return
+      if(!data) throw Error('词库不存在')
+      rememberLibrary(data)
+      displayLibraryRules(data)
+    } else displayLibraryRules(rules)
+    librariesError.value = false
+  } catch { if(seq === librarySequence) librariesError.value = true }
+  finally { if(seq === librarySequence) libraryApplying.value = false }
+}
+async function refreshLibraries() {
+  await loadLibraries()
+  if(job.value)await syncTaskLibrary(job.value.id)
+  else if(selectedLibrary.value)await applyLibrary(selectedLibrary.value)
 }
 
 const executionLists = ref([]), executionTotal = ref(0), executionLoading = ref(false), executionDetailLoading = ref(false), executionError = ref(false)
@@ -179,7 +232,7 @@ async function chooseExecutionList(id) {
   const sequence = ++executionDetailSequence
   selectedExecution.value = null
   executionMode.value = 'FILTERED'
-  clearTimeout(timer); requestSequence++; job.value = null; resultsLoading.value = false
+  clearTimeout(timer); requestSequence++; librarySequence++; libraryApplying.value=false; job.value = null; resultsLoading.value = false
   executionDetailLoading.value = false
   if (!id) return
   executionDetailLoading.value = true
@@ -193,7 +246,6 @@ async function chooseExecutionList(id) {
     if (sequence !== executionDetailSequence || disposed) return
     if (task) {
       executionMode.value = task.rules.executionMode
-      Object.assign(form, { titleWords: task.rules.titleWords, imageWords: task.rules.imageWords, detectPhones: task.rules.detectPhones, detectQrCodes: task.rules.detectQrCodes })
       await load(task.id)
     }
     executionError.value = false
@@ -288,18 +340,47 @@ async function retryAll(){
     if(!disposed && job.value?.id===id)await load(id)
   }catch(e){error(e)}finally{retryBusy.value=false}
 }
+const recheckVisible=ref(false), recheckLoading=ref(false), recheckSubmitting=ref(false), recheckTaskId=ref(null), recheckLoadError=ref('')
+const recheckForm=reactive({wordLibraryId:null,titleWords:'',imageWords:'',detectPhones:false,detectQrCodes:false})
+let recheckLibrarySequence=0
+async function applyRecheckLibrary(id){
+  const seq=++recheckLibrarySequence
+  recheckLoadError.value=''
+  recheckLoading.value=false
+  if(!id)return
+  recheckLoading.value=true
+  try{
+    const {data}=await getLibrary(id)
+    if(seq!==recheckLibrarySequence)return
+    if(!data)throw Error('过滤词库不存在，请重新选择')
+    Object.assign(recheckForm,{titleWords:data.titleWords,imageWords:data.imageWords,detectPhones:data.detectPhones,detectQrCodes:data.detectQrCodes})
+  }catch(e){if(seq===recheckLibrarySequence)recheckLoadError.value='词库读取失败，请重新选择词库或清空后手动填写'}
+  finally{if(seq===recheckLibrarySequence)recheckLoading.value=false}
+}
 async function recheckMatched(){
   if(!job.value || active.value || retryBusy.value || !pageStats.value.matched)return
   const id=job.value.id
   retryBusy.value=true
   try{
-    try{
-      await ElMessageBox.confirm(`将重新检测当前任务全部 ${pageStats.value.matched} 个命中商品（包含其他页），使用最新启用的白名单及原过滤词。所选商品的旧结果和人工处理将被替换，其他商品保持不变。商品信息优先复用缓存，缺少缓存时会调用接口并消耗额度。`, '重新检测命中项', {type:'warning',confirmButtonText:'开始重新检测',cancelButtonText:'取消'})
-    }catch{return}
-    await api.recheckMatchedProducts(id)
-    ElMessage.success('已提交命中项重新检测')
-    if(!disposed && job.value?.id===id)await load(id)
+    const [{data}, options]=await Promise.all([api.getRecheckRules(id),libraryOptions()])
+    libraries.value=options.data
+    recheckTaskId.value=id
+    Object.assign(recheckForm,{wordLibraryId:data.wordLibraryId||null,titleWords:data.titleWords||'',imageWords:data.imageWords||'',detectPhones:!!data.detectPhones,detectQrCodes:!!data.detectQrCodes})
+    recheckVisible.value=true
+    await applyRecheckLibrary(recheckForm.wordLibraryId)
   }catch(e){error(e)}finally{retryBusy.value=false}
+}
+async function submitRecheck(){
+  if(recheckSubmitting.value || recheckLoading.value || recheckLoadError.value)return
+  if(!recheckForm.wordLibraryId && (!recheckForm.titleWords.trim() || (!recheckForm.imageWords.trim()&&!recheckForm.detectPhones&&!recheckForm.detectQrCodes)))return ElMessage.warning('请填写标题过滤词，并填写图片过滤词或开启手机号、二维码检测')
+  recheckSubmitting.value=true;retryBusy.value=true
+  const id=recheckTaskId.value
+  try{
+    await api.recheckMatchedProducts(id,{...recheckForm})
+    recheckVisible.value=false
+    ElMessage.success('已使用最新规则提交命中项重新检测')
+    if(!disposed && job.value?.id===id)await load(id)
+  }catch(e){error(e)}finally{recheckSubmitting.value=false;retryBusy.value=false}
 }
 async function retry(row){
   if(!job.value||retryBusy.value)return
@@ -321,6 +402,7 @@ async function load(id,showLoading=true,attempt=0){
     if(disposed||seq!==requestSequence)return
     const {job:currentJob,...stats}=data
     job.value=currentJob;pageStats.value=stats;resultPage.value=data.pageNum;confidenceThreshold.value=currentJob.rules?.confidenceThreshold ?? 0.6;poll()
+    if(showLoading)await syncTaskLibrary(id)
   }catch(e){
     if(!disposed&&seq===requestSequence){
       const status=e?.response?.status
@@ -362,7 +444,7 @@ async function start(){
   } catch { busy.value = false; return }
   if (disposed) { busy.value = false; return }
   try {
-    const { data } = await api.createTask({ ...form, confidenceThreshold: confidenceThreshold.value, executionListId: list.id, executionMode: executionMode.value, filterVersion: executionMode.value === 'FILTERED' ? list.filterVersion : null })
+    const { data } = await api.createTask({ ...form, wordLibraryId: selectedLibrary.value || null, confidenceThreshold: confidenceThreshold.value, executionListId: list.id, executionMode: executionMode.value, filterVersion: executionMode.value === 'FILTERED' ? list.filterVersion : null })
     await load(data.id)
     localStorage.setItem('product-scan-rules', JSON.stringify({ titleWords: form.titleWords, imageWords: form.imageWords, detectPhones: form.detectPhones, detectQrCodes: form.detectQrCodes }))
     tasks.value = (await api.listTasks()).data
@@ -379,7 +461,21 @@ async function resumeCurrentTask() {
   } catch (e) { error(e) } finally { busy.value = false }
 }
 async function stop(){try{const id=job.value.id;await api.cancelTask(id);await load(id)}catch(e){error(e)}}
-async function download(only){if(thresholdSaving.value)return ElMessage.warning('正在更新检测结果，请稍后导出');try{saveAs(await api.exportTask(job.value.id,only),only?'商品筛查-通过项.csv':'商品筛查-全部.csv')}catch(e){error(e)}}
+// 使用浏览器本地导出时间；全角冒号兼容 Windows 文件名限制。
+function passedExportFileName() {
+  const now = new Date()
+  const pad = value => String(value).padStart(2, '0')
+  const date = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`
+  const time = `${pad(now.getHours())}：${pad(now.getMinutes())}：${pad(now.getSeconds())}`
+  return `商品筛查-通过项 ${date} ${time}.csv`
+}
+async function download(only) {
+  if (thresholdSaving.value) return ElMessage.warning('正在更新检测结果，请稍后导出')
+  try {
+    const blob = await api.exportTask(job.value.id, only)
+    saveAs(blob, only ? passedExportFileName() : '商品筛查-全部.csv')
+  } catch (e) { error(e) }
+}
 const reviewVisible=ref(false),reviewNote=ref(''),pendingReview=ref(null),reviewBusy=ref(false)
 function review(p,decision){pendingReview.value={id:job.value.id,itemId:p.itemId,decision};reviewNote.value='';if(decision==='NONE')saveReview();else reviewVisible.value=true}
 async function saveReview(){const r=pendingReview.value;if(!r||reviewBusy.value)return;reviewBusy.value=true;try{await api.reviewProduct(r.id,r.itemId,{decision:r.decision,note:reviewNote.value});if(job.value?.id===r.id)await load(r.id);reviewVisible.value=false;pendingReview.value=null}catch(e){error(e)}finally{reviewBusy.value=false}}
@@ -481,6 +577,11 @@ watch(() => route.query.executionListId, value => {
 })
 
 onMounted(()=>{refreshExecutionLists();loadUsage();usageTimer=setInterval(loadUsage,30000);loadLibraries();try{const saved=JSON.parse(localStorage.getItem('product-scan-rules')||'{}');form.titleWords=saved.titleWords||'';form.imageWords=saved.imageWords||'';form.detectPhones=!!saved.detectPhones;form.detectQrCodes=!!saved.detectQrCodes}catch{}if(route.query.executionListId)openListResults();else refresh()})
+let firstActivation = true
+onActivated(() => {
+  if(firstActivation){firstActivation=false;return}
+  refreshLibraries()
+})
 onBeforeUnmount(()=>{disposed=true;requestSequence++;clearTimeout(timer);clearInterval(usageTimer);clearPicture()})
 </script>
 

@@ -20,7 +20,7 @@ public class ScanGateway
     {
         if (key == null || key.isBlank() || secret == null || secret.isBlank())
             throw new ServiceException("暂时无法获取商品信息");
-        try { EmbeddedOcr.get(); }
+        try { EmbeddedOcr.initialize(); }
         catch (Exception | LinkageError e)
         {
             log.error("Embedded OCR initialization failed", e);
@@ -41,7 +41,7 @@ public class ScanGateway
             URI uri = URI.create(url);
             validateImageUri(uri);
             byte[] image = download(uri, 20 * 1024 * 1024);
-            return EmbeddedOcr.get().inspect(image);
+            return EmbeddedOcr.inspectPooled(image);
         }
         catch (Exception | LinkageError e)
         {

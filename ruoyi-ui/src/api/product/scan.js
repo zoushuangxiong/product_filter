@@ -26,4 +26,5 @@ export const retryFailedProducts = id => request({ url: `${base}/${id}/retry-fai
 export const getExecutionTask = listId => request({ url: `/product/scan/execution-lists/${listId}/task` })
 export const resumeTask = id => request({ url: `${base}/${id}/resume`, method: 'post' })
 
-export const recheckMatchedProducts = id => request({ url: `${base}/${id}/recheck-matched`, method: 'post' })
+export const recheckMatchedProducts = (id, data) => request({ url: `${base}/${id}/recheck-matched`, method: 'post', data })
+export const getRecheckRules = id => request({ url: `${base}/${id}/recheck-rules` })

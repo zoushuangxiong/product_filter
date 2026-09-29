@@ -41,6 +41,9 @@ public class ProductScanService
     @org.springframework.beans.factory.annotation.Autowired
     private com.ruoyi.system.service.IProductInfoCacheService productInfoCacheService;
 
+    @org.springframework.beans.factory.annotation.Autowired
+    private com.ruoyi.system.service.IProductWordLibraryService productWordLibraryService;
+
     /** 首次执行时读取完整启用规则，后续停止、重启和重试沿用快照。 */
     private void captureWhitelist(Job job)
     {
@@ -500,6 +503,7 @@ public class ProductScanService
         view.ruleVersion = source.ruleVersion;
         // 原始导入内容和完整词库仍保存在任务快照中，分页展示只需平台和阈值。
         view.rules = new Request();
+        view.rules.wordLibraryId = source.recheckRules == null ? source.rules.wordLibraryId : source.recheckRules.wordLibraryId;
         view.rules.executionListId = source.rules.executionListId;
         view.rules.executionMode = source.rules.executionMode;
         view.rules.platform = source.rules.platform;
@@ -550,6 +554,7 @@ public class ProductScanService
         view.cancelRequested = source.cancelRequested; view.error = source.error;
         view.ruleVersion = source.ruleVersion;
         view.rules = new Request();
+        view.rules.wordLibraryId = source.recheckRules == null ? source.rules.wordLibraryId : source.recheckRules.wordLibraryId;
         view.rules.executionListId = source.rules.executionListId;
         view.rules.executionMode = source.rules.executionMode;
         view.rules.platform = source.rules.platform;
@@ -617,8 +622,52 @@ public class ProductScanService
         return enqueueRetry(owner, id, null);
     }
 
+    /** 返回重检表单所需的规则，不返回原始CSV或商品明细。 */
+    public Request recheckRules(long owner, String id)
+    {
+        Job job = owned(owner, id);
+        synchronized (job)
+        {
+            Request source = job.recheckRules == null ? job.rules : job.recheckRules;
+            Request result = new Request();
+            result.wordLibraryId = source.wordLibraryId;
+            result.titleWords = source.titleWords; result.imageWords = source.imageWords;
+            result.detectPhones = source.detectPhones; result.detectQrCodes = source.detectQrCodes;
+            return result;
+        }
+    }
+
+    /** 从选中词库读取最新过滤词；无词库时使用用户在重检弹窗中明确提交的正文。 */
+    private Request latestRecheckRules(Job job, Request input)
+    {
+        Request result = new Request();
+        if (input == null)
+        {
+            result.wordLibraryId = job.recheckRules == null ? job.rules.wordLibraryId : job.recheckRules.wordLibraryId;
+            if (result.wordLibraryId == null) throw new ServiceException("请先选择最新过滤词库或填写本次重检过滤词");
+        }
+        else result.wordLibraryId = input.wordLibraryId;
+        if (result.wordLibraryId != null)
+        {
+            var library = productWordLibraryService.selectProductWordLibraryById(result.wordLibraryId);
+            if (library == null) throw new ServiceException("过滤词库不存在，请重新选择");
+            result.titleWords = library.getTitleWords(); result.imageWords = library.getImageWords();
+            result.detectPhones = Boolean.TRUE.equals(library.getDetectPhones());
+            result.detectQrCodes = Boolean.TRUE.equals(library.getDetectQrCodes());
+        }
+        else
+        {
+            result.titleWords = input.titleWords; result.imageWords = input.imageWords;
+            result.detectPhones = input.detectPhones; result.detectQrCodes = input.detectQrCodes;
+        }
+        if (ScanRules.words(result.titleWords).isEmpty()
+                || (ScanRules.words(result.imageWords).isEmpty() && !result.detectPhones && !result.detectQrCodes))
+            throw new ServiceException("请填写标题过滤词，并填写图片过滤词或开启手机号、二维码检测");
+        return result;
+    }
+
     /** 提取整个任务的命中项，使用最新白名单重新检测，保留其他商品结果。 */
-    public synchronized Job recheckMatched(long owner, String id)
+    public synchronized Job recheckMatched(long owner, String id, Request input)
     {
         Job job = owned(owner, id);
         synchronized (job)
@@ -630,20 +679,24 @@ public class ProductScanService
             List<String> ids = job.products.stream().filter(p -> "MATCHED".equals(p.verdict)).map(p -> p.itemId).toList();
             if (ids.isEmpty()) throw new ServiceException("没有需要重新检测的命中项");
             gateway.checkReady();
+            Request latestRules = latestRecheckRules(job, input);
             Job latest = new Job();
             captureWhitelist(latest);
             String oldState = job.state, oldError = job.error;
             boolean oldCancel = job.cancelRequested;
+            Request oldRules = job.recheckRules;
             List<WhitelistRule> oldWhitelist = job.recheckWhitelist;
             List<String> oldRetryIds = job.retryItemIds;
             String oldOnly = job.retryOnlyItemId;
             job.recheckItemIds = new ArrayList<>(ids); job.recheckWhitelist = latest.whitelistRules;
+            job.recheckRules = latestRules;
             job.retryItemIds = new ArrayList<>(); job.retryOnlyItemId = null;
             job.state = "QUEUED"; job.error = null; job.cancelRequested = false;
             try { save(job); executor.execute(() -> run(job)); }
             catch (RuntimeException e)
             {
                 job.recheckItemIds = new ArrayList<>(); job.recheckWhitelist = oldWhitelist;
+                job.recheckRules = oldRules;
                 job.retryItemIds = oldRetryIds; job.retryOnlyItemId = oldOnly;
                 job.state = oldState; job.error = oldError; job.cancelRequested = oldCancel;
                 save(job);
@@ -820,6 +873,11 @@ public class ProductScanService
         };
     }
 
+    /** 全服务共享三个商品工作线程，多个清单不会叠加为六路或更多并发。 */
+    private final java.util.concurrent.ExecutorService productExecutor = java.util.concurrent.Executors.newFixedThreadPool(3, runnable -> {
+        Thread thread = new Thread(runnable, "product-worker"); thread.setDaemon(true); return thread;
+    });
+
     private void run(Job job)
     {
         long segmentStarted = System.currentTimeMillis();
@@ -836,209 +894,40 @@ public class ProductScanService
                 save(job);
             }
             // 同一任务中相同图片 URL 只识别一次，各商品仍保留自己的图片记录。
-            Map<String, Cached> cache = new HashMap<>();
-            ScanRules.PreparedWords titleWords = ScanRules.prepare(job.rules.titleWords), imageWords = ScanRules.prepare(job.rules.imageWords);
+            Map<String, Cached> cache = new ConcurrentHashMap<>();
             boolean rechecking = !job.recheckItemIds.isEmpty();
+            Request activeRules = rechecking && job.recheckRules != null ? job.recheckRules : job.rules;
+            ScanRules.PreparedWords titleWords = ScanRules.prepare(activeRules.titleWords), imageWords = ScanRules.prepare(activeRules.imageWords);
             Set<String> recheckIds = new java.util.HashSet<>(job.recheckItemIds);
             ScanWhitelist whitelist = new ScanWhitelist(rechecking ? job.recheckWhitelist : job.whitelistRules);
             Map<String, List<String>> importedTitles = ScanCsvSource.titles(job.rules.sourceCsv, job.rules.platform);
             Set<String> retryIds = new java.util.HashSet<>(job.retryItemIds);
             if (job.retryOnlyItemId != null) retryIds.add(job.retryOnlyItemId);
             boolean retrying = !retryIds.isEmpty();
+            var pending = new java.util.concurrent.ConcurrentLinkedQueue<Product>();
             for (Product p : job.products)
             {
                 if (rechecking && !recheckIds.contains(p.itemId)) continue;
                 if (retrying && !retryIds.contains(p.itemId)) continue;
-                if (job.retryOnlyItemId != null && !job.retryOnlyItemId.equals(p.itemId)) continue;
                 if (!retrying && !rechecking && Set.of("DONE", "FAILED").contains(p.state)) continue;
-                if (stopping(job)) break;
-                try
-                {
-                    if (rechecking)
-                    {
-                        synchronized (job)
-                        {
-                            // 首次处理该命中商品才清理旧判定，继续时保留已经重新识别的图片。
-                            if ("MATCHED".equals(p.verdict))
-                            {
-                                p.titleHits = new ArrayList<>(); p.pictures.clear(); p.warnings.clear();
-                                p.importedTitleChecked = false; p.providerFetched = false;
-                                p.title = null; p.error = null; p.incomplete = false;
-                                p.review = "NONE"; p.reviewNote = null; p.reviewedAt = null;
-                                p.verdict = "REVIEW"; p.state = "PENDING";
-                                save(job);
-                            }
-                        }
-                    }
-                    // 必须在预占额度、调用商品接口之前匹配导入标题。
-                    List<String> titles = importedTitles.getOrDefault(p.itemId, List.of());
-                    if (!titles.isEmpty())
-                    {
-                        synchronized (job)
-                        {
-                            if (!p.importedTitleChecked)
-                            {
-                                p.title = titles.get(0);
-                                p.titleHits = List.of();
-                                for (String title : titles)
-                                {
-                                    List<String> hits = titleWords.match(title, false, true, whitelist);
-                                    if (!hits.isEmpty()) { p.title = title; p.titleHits = hits; break; }
-                                }
-                                p.importedTitleChecked = true;
-                            }
-                            if (!p.titleHits.isEmpty())
-                            {
-                                p.state = "DONE"; p.verdict = "MATCHED";
-                                p.error = null; p.incomplete = false;
-                                save(job);
-                                continue;
-                            }
-                        }
-                    }
-                    if (retrying || !p.providerFetched || p.title == null)
-                    {
-                    synchronized (job) { p.state = "FETCHING"; save(job); }
-                    // 缓存查询在额度预占之前；只有数据库没有商品信息时才调用第三方并计费。
-                    var product = productInfoCacheService.getOrFetch(p.platform, p.itemId, () -> fetchAndCharge(p));
-                    if (product == null)
-                    {
-                        synchronized (job)
-                        {
-                            job.error = "DAILY_LIMIT_EXCEEDED";
-                            if (!retrying) { p.state = "PENDING"; p.error = "DAILY_LIMIT_EXCEEDED"; p.incomplete = true; }
-                            else p.state = "FAILED";
-                            save(job);
-                        }
-                        break;
-                    }
-                    synchronized (job)
-                    {
-                        if (retrying)
-                        {
-                            p.retryCount++; p.error = null; p.incomplete = false;
-                            p.verdict = "REVIEW"; p.title = null; p.titleHits = new ArrayList<>(); p.pictures.clear();
-                            p.warnings.clear();
-                        }
-                    }
-                    synchronized (job)
-                    {
-                        p.providerFetched = true;
-                        p.price = product.getPriceText(); p.categoryName = product.getCategoryName();
-                        p.shopUrl = product.getShopUrl(); p.sales = product.getSales(); p.commentCount = product.getCommentCount();
-                        // 有导入标题时已完成匹配，接口标题不再参与判定；无标题才在此补检。
-                        p.title = titles.isEmpty() ? product.getTitle() : titles.get(0);
-                        p.titleHits = titles.isEmpty() ? titleWords.match(p.title, false, true, whitelist) : List.of();
-                        p.warnings.add("检测范围为接口实际返回内容；未命中词库不代表平台合规或上游图片完整");
-                        addPictures(p, "MAIN", product.getMainImages()); addPictures(p, "DETAIL", product.getDetailImages());
-                        p.state = "SCANNING"; save(job);
-                    }
-                    }
-                    synchronized (job)
-                    {
-                        p.error = null;
-                        p.incomplete = p.pictures.stream().anyMatch(pic -> "FAILED".equals(pic.state)
-                                || (pic.ocr != null && pic.ocr.lines.stream().anyMatch(line -> line.score < threshold(job))));
-                        p.state = "SCANNING";
-                    }
-                    // 标题或中断前的图片已经命中时，直接保留不通过结果，不再下载剩余图片。
-                    if (!p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0))
-                    {
-                        synchronized (job)
-                        {
-                            p.state = "DONE";
-                            p.verdict = "MATCHED";
-                            save(job);
-                        }
-                        continue;
-                    }
-                    for (Picture pic : p.pictures)
-                    {
-                        if (stopping(job)) break;
-                        if (Set.of("DONE", "FAILED", "SKIPPED").contains(pic.state)) continue;
-                        synchronized (job) { pic.state = "SCANNING"; save(job); }
-                        try
-                        {
-                            Cached cached = cache.get(pic.url);
-                            if (cached == null)
-                            {
-                                ScanGateway.Inspection inspection = gateway.inspect(pic.url);
-                                String key = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(inspection.preview()));
-                                Path dest = storage.resolve("assets").resolve(key + ".jpg");
-                                if (!Files.exists(dest))
-                                {
-                                    Path tmp = Files.createTempFile(storage.resolve("assets"), "preview-", ".tmp");
-                                    try { Files.write(tmp, inspection.preview()); Files.move(tmp, dest, StandardCopyOption.REPLACE_EXISTING); }
-                                    finally { Files.deleteIfExists(tmp); }
-                                }
-                                cached = new Cached(inspection.ocr(), key, inspection.qrCodes()); cache.put(pic.url, cached);
-                            }
-                            Set<String> hits = new LinkedHashSet<>();
-                            Ocr evidence = new Ocr();
-                            evidence.width = cached.ocr.width; evidence.height = cached.ocr.height; evidence.engine = cached.ocr.engine;
-                            // 不修改复用的原始OCR缓存，保存本行实际命中，避免将已放行的其他行再次标红。
-                            for (Line original : cached.ocr.lines)
-                            {
-                                Line line = new Line(); line.text = original.text; line.score = original.score; line.box = original.box;
-                                line.hits = imageWords.match(line.text, job.rules.detectPhones, false, whitelist);
-                                hits.addAll(line.hits); evidence.lines.add(line);
-                            }
-                            synchronized (job)
-                            {
-                                pic.ocr = evidence; pic.previewKey = cached.key; pic.hits = List.copyOf(hits); pic.qrCodes = job.rules.detectQrCodes ? cached.qrCodes : 0; pic.state = "DONE";
-                                if (pic.ocr.lines.stream().anyMatch(line -> line.score < threshold(job)))
-                                { p.incomplete = true; p.warnings.add(pic.kind + pic.index + " 有低置信度文字，请人工核查"); }
-                                save(job);
-                            }
-                            // 当前图片已经命中时，商品确定不通过，跳过同一商品剩余图片。
-                            if (!hits.isEmpty() || (job.rules.detectQrCodes && cached.qrCodes > 0))
-                            {
-                                synchronized (job)
-                                {
-                                    boolean current = false;
-                                    for (Picture remaining : p.pictures)
-                                    {
-                                        if (remaining == pic) { current = true; continue; }
-                                        if (current && "PENDING".equals(remaining.state)) remaining.state = "SKIPPED";
-                                    }
-                                    save(job);
-                                }
-                                break;
-                            }
-                        }
-                        catch (Exception e)
-                        {
-                            synchronized (job) { pic.state = "FAILED"; pic.error = "图片读取或识别失败"; p.incomplete = true; save(job); }
-                        }
-                    }
-                    synchronized (job)
-                    {
-                        boolean unfinished = p.pictures.stream().anyMatch(pic -> !"DONE".equals(pic.state) && !"SKIPPED".equals(pic.state));
-                        p.incomplete |= unfinished;
-                        p.state = stopping(job) ? "CANCELLED" : "DONE";
-                        p.verdict = !p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0) ? "MATCHED"
-                                : p.incomplete ? "REVIEW" : "CLEAR";
-                        save(job);
-                    }
-                }
-                catch (Exception e)
-                {
-                    synchronized (job)
-                    {
-                        p.state = "FAILED"; p.incomplete = true;
-                        p.error = e instanceof TaobaoFetchException ? ((TaobaoFetchException) e).getCode().name() : "商品获取或任务处理失败";
-                        save(job);
-                    }
-                }
-                finally
-                {
-                    if (rechecking) synchronized (job)
-                    {
-                        if (Set.of("DONE", "FAILED").contains(p.state))
-                        { job.recheckItemIds.remove(p.itemId); save(job); }
-                    }
-                }
+                pending.add(p);
             }
+            var quotaReached = new java.util.concurrent.atomic.AtomicBoolean();
+            var workers = new ArrayList<java.util.concurrent.CompletableFuture<Void>>();
+            for (int i = 0; i < 3; i++)
+            {
+                workers.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
+                    while (!stopping(job) && !quotaReached.get())
+                    {
+                        Product p = pending.poll();
+                        if (p == null) return;
+                        if (!processProduct(job, p, rechecking, retrying, activeRules, titleWords, imageWords,
+                                whitelist, importedTitles, cache)) quotaReached.set(true);
+                    }
+                }, productExecutor));
+            }
+            // 全部已领取商品结束后才能发布任务完成状态，不能提前汇总或允许再次执行。
+            java.util.concurrent.CompletableFuture.allOf(workers.toArray(java.util.concurrent.CompletableFuture[]::new)).join();
             synchronized (job)
             {
                 job.retryOnlyItemId = null;
@@ -1060,6 +949,214 @@ public class ProductScanService
                 save(job);
             }
         }
+    }
+
+    /**
+     * 每个工作线程独占一个商品；同一商品内图片仍顺序处理，命中立即停止。
+     *
+     * @param job 所属检测任务
+     * @param p 当前商品
+     * @param rechecking 是否重新检测命中项
+     * @param retrying 是否重试获取异常项
+     * @param activeRules 本轮执行的过滤规则快照
+     * @param titleWords 预处理后的标题过滤词
+     * @param imageWords 预处理后的图片过滤词
+     * @param whitelist 本轮白名单快照
+     * @param importedTitles 按商品编号归集的导入标题
+     * @param cache 同一任务各工作线程共享的图片识别缓存
+     * @return 是否可以继续领取下一个商品；额度不足时停止领取
+     */
+    private boolean processProduct(Job job, Product p, boolean rechecking, boolean retrying,
+            Request activeRules, ScanRules.PreparedWords titleWords, ScanRules.PreparedWords imageWords,
+            ScanWhitelist whitelist, Map<String, List<String>> importedTitles, Map<String, Cached> cache)
+    {
+        try
+        {
+            if (rechecking)
+            {
+                synchronized (job)
+                {
+                    // 首次处理该命中商品才清理旧判定，继续时保留已经重新识别的图片。
+                    if ("MATCHED".equals(p.verdict))
+                    {
+                        p.titleHits = new ArrayList<>(); p.pictures.clear(); p.warnings.clear();
+                        p.importedTitleChecked = false; p.providerFetched = false;
+                        p.title = null; p.error = null; p.incomplete = false;
+                        p.review = "NONE"; p.reviewNote = null; p.reviewedAt = null;
+                        p.verdict = "REVIEW"; p.state = "PENDING";
+                        save(job);
+                    }
+                }
+            }
+            // 必须在预占额度、调用商品接口之前匹配导入标题。
+            List<String> titles = importedTitles.getOrDefault(p.itemId, List.of());
+            if (!titles.isEmpty())
+            {
+                synchronized (job)
+                {
+                    if (!p.importedTitleChecked)
+                    {
+                        p.title = titles.get(0);
+                        p.titleHits = List.of();
+                        for (String title : titles)
+                        {
+                            List<String> hits = titleWords.match(title, false, true, whitelist);
+                            if (!hits.isEmpty()) { p.title = title; p.titleHits = hits; break; }
+                        }
+                        p.importedTitleChecked = true;
+                    }
+                    if (!p.titleHits.isEmpty())
+                    {
+                        p.state = "DONE"; p.verdict = "MATCHED";
+                        p.error = null; p.incomplete = false;
+                        save(job);
+                        return true;
+                    }
+                }
+            }
+            if (retrying || !p.providerFetched || p.title == null)
+            {
+            synchronized (job) { p.state = "FETCHING"; save(job); }
+            // 缓存查询在额度预占之前；只有数据库没有商品信息时才调用第三方并计费。
+            var product = productInfoCacheService.getOrFetch(p.platform, p.itemId, () -> fetchAndCharge(p));
+            if (product == null)
+            {
+                synchronized (job)
+                {
+                    job.error = "DAILY_LIMIT_EXCEEDED";
+                    if (!retrying) { p.state = "PENDING"; p.error = "DAILY_LIMIT_EXCEEDED"; p.incomplete = true; }
+                    else p.state = "FAILED";
+                    save(job);
+                }
+                return false;
+            }
+            synchronized (job)
+            {
+                if (retrying)
+                {
+                    p.retryCount++; p.error = null; p.incomplete = false;
+                    p.verdict = "REVIEW"; p.title = null; p.titleHits = new ArrayList<>(); p.pictures.clear();
+                    p.warnings.clear();
+                }
+            }
+            synchronized (job)
+            {
+                p.providerFetched = true;
+                p.price = product.getPriceText(); p.categoryName = product.getCategoryName();
+                p.shopUrl = product.getShopUrl(); p.sales = product.getSales(); p.commentCount = product.getCommentCount();
+                // 有导入标题时已完成匹配，接口标题不再参与判定；无标题才在此补检。
+                p.title = titles.isEmpty() ? product.getTitle() : titles.get(0);
+                p.titleHits = titles.isEmpty() ? titleWords.match(p.title, false, true, whitelist) : List.of();
+                p.warnings.add("检测范围为接口实际返回内容；未命中词库不代表平台合规或上游图片完整");
+                addPictures(p, "MAIN", product.getMainImages()); addPictures(p, "DETAIL", product.getDetailImages());
+                p.state = "SCANNING"; save(job);
+            }
+            }
+            synchronized (job)
+            {
+                p.error = null;
+                p.incomplete = p.pictures.stream().anyMatch(pic -> "FAILED".equals(pic.state)
+                        || (pic.ocr != null && pic.ocr.lines.stream().anyMatch(line -> line.score < threshold(job))));
+                p.state = "SCANNING";
+            }
+            // 标题或中断前的图片已经命中时，直接保留不通过结果，不再下载剩余图片。
+            if (!p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0))
+            {
+                synchronized (job)
+                {
+                    p.state = "DONE";
+                    p.verdict = "MATCHED";
+                    save(job);
+                }
+                return true;
+            }
+            for (Picture pic : p.pictures)
+            {
+                if (stopping(job)) break;
+                if (Set.of("DONE", "FAILED", "SKIPPED").contains(pic.state)) continue;
+                synchronized (job) { pic.state = "SCANNING"; save(job); }
+                try
+                {
+                    Cached cached = cache.computeIfAbsent(pic.url, url -> {
+                        try {
+                        ScanGateway.Inspection inspection = gateway.inspect(pic.url);
+                        String key = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(inspection.preview()));
+                        Path dest = storage.resolve("assets").resolve(key + ".jpg");
+                        if (!Files.exists(dest))
+                        {
+                            Path tmp = Files.createTempFile(storage.resolve("assets"), "preview-", ".tmp");
+                            try { Files.write(tmp, inspection.preview()); Files.move(tmp, dest, StandardCopyOption.REPLACE_EXISTING); }
+                            finally { Files.deleteIfExists(tmp); }
+                        }
+                        return new Cached(inspection.ocr(), key, inspection.qrCodes());
+                        } catch (Exception e) { throw new IllegalStateException(e); }
+                    });
+                    Set<String> hits = new LinkedHashSet<>();
+                    Ocr evidence = new Ocr();
+                    evidence.width = cached.ocr.width; evidence.height = cached.ocr.height; evidence.engine = cached.ocr.engine;
+                    // 不修改复用的原始OCR缓存，保存本行实际命中，避免将已放行的其他行再次标红。
+                    for (Line original : cached.ocr.lines)
+                    {
+                        Line line = new Line(); line.text = original.text; line.score = original.score; line.box = original.box;
+                        line.hits = imageWords.match(line.text, activeRules.detectPhones, false, whitelist);
+                        hits.addAll(line.hits); evidence.lines.add(line);
+                    }
+                    synchronized (job)
+                    {
+                        pic.ocr = evidence; pic.previewKey = cached.key; pic.hits = List.copyOf(hits); pic.qrCodes = activeRules.detectQrCodes ? cached.qrCodes : 0; pic.state = "DONE";
+                        if (pic.ocr.lines.stream().anyMatch(line -> line.score < threshold(job)))
+                        { p.incomplete = true; p.warnings.add(pic.kind + pic.index + " 有低置信度文字，请人工核查"); }
+                        save(job);
+                    }
+                    // 当前图片已经命中时，商品确定不通过，跳过同一商品剩余图片。
+                    if (!hits.isEmpty() || (activeRules.detectQrCodes && cached.qrCodes > 0))
+                    {
+                        synchronized (job)
+                        {
+                            boolean current = false;
+                            for (Picture remaining : p.pictures)
+                            {
+                                if (remaining == pic) { current = true; continue; }
+                                if (current && "PENDING".equals(remaining.state)) remaining.state = "SKIPPED";
+                            }
+                            save(job);
+                        }
+                        break;
+                    }
+                }
+                catch (Exception e)
+                {
+                    synchronized (job) { pic.state = "FAILED"; pic.error = "图片读取或识别失败"; p.incomplete = true; save(job); }
+                }
+            }
+            synchronized (job)
+            {
+                boolean unfinished = p.pictures.stream().anyMatch(pic -> !"DONE".equals(pic.state) && !"SKIPPED".equals(pic.state));
+                p.incomplete |= unfinished;
+                p.state = stopping(job) ? "CANCELLED" : "DONE";
+                p.verdict = !p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0) ? "MATCHED"
+                        : p.incomplete ? "REVIEW" : "CLEAR";
+                save(job);
+            }
+        }
+        catch (Exception e)
+        {
+            synchronized (job)
+            {
+                p.state = "FAILED"; p.incomplete = true;
+                p.error = e instanceof TaobaoFetchException ? ((TaobaoFetchException) e).getCode().name() : "商品获取或任务处理失败";
+                save(job);
+            }
+        }
+        finally
+        {
+            if (rechecking) synchronized (job)
+            {
+                if (Set.of("DONE", "FAILED").contains(p.state))
+                { job.recheckItemIds.remove(p.itemId); save(job); }
+            }
+        }
+        return true;
     }
 
     private void addPictures(Product p, String kind, List<String> urls)
@@ -1100,6 +1197,11 @@ public class ProductScanService
         finally { if (temp != null) try { Files.deleteIfExists(temp); } catch (Exception ignored) { } }
     }
     @PreDestroy
-    public void close() { executor.shutdownNow(); }
+    public void close()
+    {
+        for (Job job : jobs.values()) synchronized (job) { job.cancelRequested = true; }
+        executor.shutdown();
+        productExecutor.shutdown();
+    }
     private record Cached(Ocr ocr, String key, int qrCodes) { }
 }

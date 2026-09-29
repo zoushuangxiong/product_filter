@@ -30,11 +30,8 @@ public final class ScanWhitelist
                 String expression;
                 if ("WORD".equals(rule.matchType))
                 {
-                    // 中文白名单按连续文字整体匹配，不把“不完美”中的“完美”单独放行。
-                    // 英文继续按英文单词边界匹配，保留英文词汇出现在中文描述中的用法。
-                    boolean chinese = content.codePoints().anyMatch(cp -> Character.UnicodeScript.of(cp) == Character.UnicodeScript.HAN);
-                    String boundary = chinese ? "[\\p{L}\\p{M}\\p{N}_]" : "[a-z0-9_]";
-                    expression = "(?<!" + boundary + ")" + Pattern.quote(content) + "(?!" + boundary + ")";
+                    // 词汇按包含匹配，不限制前后字符；仍只豁免该片段覆盖的命中位置。
+                    expression = Pattern.quote(content);
                 }
                 else if ("UNIT".equals(rule.matchType))
                 {
@@ -65,7 +62,13 @@ public final class ScanWhitelist
         for (Pattern pattern : candidates)
         {
             var matcher = pattern.matcher(text);
-            while (matcher.find()) allowed.add(new int[] { matcher.start(), matcher.end() });
+            // 包含片段可能重叠，例如ababa中的两个aba，需要同时保留覆盖范围。
+            int searchFrom = 0;
+            while (matcher.find(searchFrom))
+            {
+                allowed.add(new int[] { matcher.start(), matcher.end() });
+                searchFrom = matcher.start() + 1;
+            }
         }
         for (int start = first; start >= 0; start = text.indexOf(word, start + 1))
         {

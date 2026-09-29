@@ -15,17 +15,38 @@ import org.locationtech.jts.operation.buffer.BufferParameters;
 /** Java 进程内的 PP-OCRv4，沿用 RapidOCR 1.4.4 模型；预处理细节差异可能影响识别结果。 */
 final class EmbeddedOcr
 {
-    private static EmbeddedOcr instance;
+    private static java.util.concurrent.BlockingQueue<EmbeddedOcr> pool;
     private final OrtEnvironment env = OrtEnvironment.getEnvironment();
     // det 定位文字区域，cls 判断文字方向，rec 识别文字。
     private final OrtSession det, cls, rec;
     private final List<String> characters;
 
-    /** 首次使用时加载 JAR 内的模型，后续任务复用，避免反复分配模型内存。 */
-    static synchronized EmbeddedOcr get() throws Exception
+    /** 三个独立模型实例由全服务复用；借出期间一个实例只处理一张图片。 */
+    static synchronized void initialize() throws Exception
     {
-        if (instance == null) instance = new EmbeddedOcr();
-        return instance;
+        if (pool != null) return;
+        var created = new java.util.concurrent.ArrayBlockingQueue<EmbeddedOcr>(3);
+        try
+        {
+            for (int i = 0; i < 3; i++) created.add(new EmbeddedOcr());
+            pool = created;
+        }
+        catch (Exception | LinkageError e)
+        {
+            for (EmbeddedOcr ocr : created)
+                for (OrtSession session : new OrtSession[]{ocr.det, ocr.cls, ocr.rec})
+                    try { session.close(); } catch (Exception ignored) { }
+            throw e;
+        }
+    }
+
+    /** 等待空闲实例可被中断；识别失败也归还实例，防止池容量泄漏。 */
+    static ScanGateway.Inspection inspectPooled(byte[] bytes) throws Exception
+    {
+        initialize();
+        EmbeddedOcr ocr = pool.take();
+        try { return ocr.inspect(bytes); }
+        finally { pool.add(ocr); }
     }
 
     private EmbeddedOcr() throws Exception
@@ -67,7 +88,7 @@ final class EmbeddedOcr
         }
     }
 
-    /** 两个任务线程串行共享 OCR，限制同时推理占用的原生内存。 */
+    /** 仅由持有当前实例的工作线程执行，三个实例可同时识别。 */
     synchronized ScanGateway.Inspection inspect(byte[] bytes) throws Exception
     {
         if (bytes.length == 0 || bytes.length > 20 * 1024 * 1024) throw new IOException("Invalid image size");
