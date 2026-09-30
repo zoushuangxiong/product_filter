@@ -513,7 +513,7 @@ public class ProductScanService
         view.durationMillis = source.durationMillis; view.state = source.state;
         view.segmentStartedAt = source.segmentStartedAt;
         view.resumable = source.resumable || source.products.stream().anyMatch(p -> !Set.of("DONE", "FAILED").contains(p.state));
-        view.cancelRequested = source.cancelRequested; view.error = source.error;
+        view.cancelRequested = owned(owner, id).cancelRequested; view.error = source.error;
         view.ruleVersion = source.ruleVersion;
         // 原始导入内容和完整词库仍保存在任务快照中，分页展示只需平台和阈值。
         view.rules = new Request();
@@ -617,11 +617,12 @@ public class ProductScanService
     /** 设置停止标记，在处理边界停止后续工作；不会撤销已发出的请求。 */
     public Job cancel(long owner, String id)
     {
-        Job job = owned(owner, id); synchronized (job)
-        {
-            if (active(job)) { job.cancelRequested = true; save(job); }
-            return response(job);
-        }
+        Job job = owned(owner, id);
+        // 控制信号不能等待整单写盘锁；最终状态由运行线程统一落盘。
+        if (active(job)) job.cancelRequested = true;
+        Job view = response(snapshot(owner, id).overview());
+        view.cancelRequested = job.cancelRequested;
+        return view;
     }
 
     /** 重新尝试获取单个商品；和批量重试共用资格校验与任务队列，不限制人工重试次数。 */
@@ -1038,6 +1039,7 @@ public class ProductScanService
                         storage.resolve("assets"),
                         () -> stopping(job), updated -> {
                             synchronized (job) {
+                                if (stopping(job)) throw new java.util.concurrent.CancellationException();
                                 p.title = updated.title; p.titleHits = updated.titleHits;
                                 p.price = updated.price; p.categoryName = updated.categoryName; p.shopUrl = updated.shopUrl;
                                 p.sales = updated.sales; p.commentCount = updated.commentCount;
@@ -1078,13 +1080,22 @@ public class ProductScanService
             }
             return false;
         }
+        catch (java.util.concurrent.CancellationException e)
+        {
+            synchronized (job) {
+                // 收尾统一保存，避免每个并发商品停止时各重写一次完整清单。
+                if (!Set.of("DONE", "FAILED").contains(p.state)) {
+                    p.state = "CANCELLED"; p.incomplete = true;
+                }
+            }
+        }
         catch (Exception e)
         {
             synchronized (job)
             {
                 p.state = stopping(job) ? "CANCELLED" : "FAILED"; p.incomplete = true;
                 p.error = e instanceof TaobaoFetchException ? ((TaobaoFetchException) e).getCode().name() : "商品获取或任务处理失败";
-                save(job);
+                if (!stopping(job)) save(job);
             }
         }
         finally
@@ -1092,7 +1103,7 @@ public class ProductScanService
             if (rechecking) synchronized (job)
             {
                 if (Set.of("DONE", "FAILED").contains(p.state))
-                { job.recheckItemIds.remove(p.itemId); save(job); }
+                { job.recheckItemIds.remove(p.itemId); if (!stopping(job)) save(job); }
             }
         }
         return true;
@@ -1106,7 +1117,7 @@ public class ProductScanService
         return job;
     }
     private static boolean active(Job job) { return "QUEUED".equals(job.state) || "RUNNING".equals(job.state); }
-    private static boolean stopping(Job job) { synchronized (job) { return job.cancelRequested || Thread.currentThread().isInterrupted(); } }
+    private static boolean stopping(Job job) { return job.cancelRequested || Thread.currentThread().isInterrupted(); }
     private static Job copy(Job job) { return JSON.parseObject(JSON.toJSONString(job, JSONWriter.Feature.LargeObject), Job.class); }
     /** 先写临时文件再替换快照，减少中断时损坏历史数据的风险。 */
     private void save(Job job)
@@ -1140,7 +1151,7 @@ public class ProductScanService
     @PreDestroy
     public void close()
     {
-        for (Job job : jobs.values()) synchronized (job) { job.cancelRequested = true; }
+        for (Job job : jobs.values()) job.cancelRequested = true;
         executor.shutdown();
         productExecutor.shutdown();
     }

@@ -46,7 +46,7 @@ public class ScanGateway
         }
         catch (Exception | LinkageError e)
         {
-            log.warn("Image download or embedded OCR failed", e);
+            // 单张图片失败由检测引擎记录结果，不输出日志或异常堆栈。
             throw new ServiceException("图片下载或文字识别失败，未计为通过");
         }
     }

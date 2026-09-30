@@ -61,8 +61,8 @@ public final class ScanModels
         public String segmentStartedAt;
         /** 是否仍有未执行完的商品（不含获取异常）。 */
         public boolean resumable;
-        public String state = "QUEUED";
-        public boolean cancelRequested;
+        public volatile String state = "QUEUED";
+        public volatile boolean cancelRequested;
         public String error;
         public Request rules;
         /** null表示旧任务尚未固定白名单；空集合表示任务创建时没有启用规则。 */

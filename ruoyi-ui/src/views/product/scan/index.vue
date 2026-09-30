@@ -66,7 +66,7 @@
       <template #header><div class="card-heading"><div><h2>检测结果</h2><p>查看命中内容、人工复核与导出结果</p></div></div></template>
       <div class="toolbar">
         <el-select :model-value="job?.id" :disabled="resultsLoading || historyLoading" placeholder="选择历史任务" style="width:330px" @change="load"><el-option v-for="task in tasks" :key="task.id" :value="task.id" :label="taskLabel(task)"/></el-select>
-        <el-button :loading="historyLoading" :disabled="resultsLoading" @click="refresh">刷新</el-button><el-button :disabled="!active || job?.cancelRequested" @click="stop">停止任务</el-button>
+        <el-button :loading="historyLoading" :disabled="resultsLoading" @click="refresh">刷新</el-button><el-button :loading="stopBusy" :disabled="!active || job?.cancelRequested || stopBusy" @click="stop">{{ job?.cancelRequested ? '正在停止' : '停止任务' }}</el-button>
         <el-button v-if="job" type="primary" icon="VideoPlay" :loading="busy" :disabled="active || busy || retryBusy || resultsLoading || historyLoading || !job.resumable" @click="resumeCurrentTask">继续任务</el-button>
       </div>
       <el-alert v-if="resultsError" :title="resultsError" type="error" :closable="false" show-icon/>
@@ -117,7 +117,7 @@
       <el-alert v-if="recheckLoadError" :title="recheckLoadError" type="error" :closable="false" />
     </el-dialog>
     <el-dialog v-model="pictureVisible" :title="pictureTitle" width="90%" class="picture-dialog" append-to-body @closed="clearPicture">
-      <div v-if="picture" class="picture-grid" v-loading="pictureLoading"><div class="preview-frame"><img v-if="previewUrl && !previewFailed" :src="previewUrl" alt="商品核查图片" referrerpolicy="no-referrer" @error="previewFailed=true"><el-empty v-if="previewFailed" description="原图暂时无法加载，请稍后再试"/><svg v-if="previewUrl && !previewFailed && picture.ocr" :viewBox="`0 0 ${picture.ocr.width} ${picture.ocr.height}`"><template v-for="(hit,index) in hits" :key="index"><polygon :points="hit.points" fill="none" stroke="white" stroke-width="4" vector-effect="non-scaling-stroke"/><polygon :points="hit.points" fill="none" :stroke="hit.matched ? '#e11d2e' : '#c87500'" stroke-width="2" vector-effect="non-scaling-stroke"/></template></svg><template v-if="previewUrl"><span v-for="(hit,index) in hits" :key="index" class="hit-marker" :style="{left: hit.left+'%', top: hit.top+'%', background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</span></template></div><div><p v-if="picture.error" class="error">图片读取或识别失败，请对照原图人工核查。</p><p v-if="picture.hits.length">命中词：{{ picture.hits.join('、') }}</p><p v-if="!pictureProductMatched && hasLowConfidence(picture)" class="muted">橙框标记识别置信度低于 {{ Math.round(confidenceThreshold * 100) }}% 的文字，请对照原图核查。</p><div v-for="(hit,index) in hits" :key="index" class="hit-line"><b :style="{background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</b><div>{{ hit.text }}<div class="muted">{{ hit.matched ? '命中词库' : '待核查文字' }}<span v-if="hit.lowConfidence"> · 低置信度 {{ (hit.score*100).toFixed(1) }}%</span></div></div></div><p v-if="!hits.length">文字位置暂不可用，请结合原图复核。</p></div></div>
+      <div v-if="picture" class="picture-grid" v-loading="pictureLoading"><div class="preview-frame"><img v-if="previewUrl && !previewFailed" :key="pictureSequence" :data-sequence="pictureSequence" :src="previewUrl" alt="商品核查图片" referrerpolicy="no-referrer" @load="finishPreview($event, true)" @error="finishPreview($event, false)"><el-empty v-if="previewFailed" description="图片读取失败，原图暂时无法加载，请稍后再试"/><svg v-if="previewLoaded && picture.ocr" preserveAspectRatio="none" :viewBox="`0 0 ${picture.ocr.width} ${picture.ocr.height}`"><template v-for="(hit,index) in hits" :key="index"><polygon :points="hit.points" fill="none" stroke="white" stroke-width="4" vector-effect="non-scaling-stroke"/><polygon :points="hit.points" fill="none" :stroke="hit.matched ? '#e11d2e' : '#c87500'" stroke-width="2" vector-effect="non-scaling-stroke"/></template></svg><template v-if="previewLoaded"><span v-for="(hit,index) in hits" :key="index" class="hit-marker" :style="{left: hit.left+'%', top: hit.top+'%', background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</span></template></div><div><p v-if="picture.error" class="error">图片读取或识别失败，请对照原图人工核查。</p><p v-if="picture.hits.length">命中词：{{ picture.hits.join('、') }}</p><p v-if="!pictureProductMatched && hasLowConfidence(picture)" class="muted">橙框标记识别置信度低于 {{ Math.round(confidenceThreshold * 100) }}% 的文字，请对照原图核查。</p><div v-for="(hit,index) in hits" :key="index" class="hit-line"><b :style="{background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</b><div>{{ hit.text }}<div class="muted">{{ hit.matched ? '命中词库' : '待核查文字' }}<span v-if="hit.lowConfidence"> · 低置信度 {{ (hit.score*100).toFixed(1) }}%</span></div></div></div><p v-if="!hits.length">文字位置暂不可用，请结合原图复核。</p></div></div>
     </el-dialog>
     <el-dialog v-model="reviewVisible" :title="pendingReview?.decision === 'TRUSTED' ? '信任本商品' : '排除本商品'" width="500px" append-to-body><el-form label-position="top"><el-form-item label="复核原因（选填）"><el-input v-model="reviewNote" type="textarea" :rows="4" maxlength="500" placeholder="可留空"/></el-form-item></el-form><p class="muted">仅影响当前任务，保留原始词库和命中证据。</p><template #footer><el-button @click="reviewVisible=false">取消</el-button><el-button type="primary" :loading="reviewBusy" @click="saveReview">保存复核</el-button></template></el-dialog>
   </div>
@@ -288,9 +288,10 @@ const progress = computed(() => {
   const stats = pageStats.value
   const current = active.value && stats.currentIndex ? { itemId: stats.currentItemId, state: stats.currentState } : null
   let title = label(job.value?.state) || '检测进度'
-  if (job.value?.state === 'QUEUED') title = '等待开始检测'
+  if (active.value && job.value?.cancelRequested) title = '正在停止任务，等待当前操作结束'
+  else if (job.value?.state === 'QUEUED') title = '等待开始检测'
   else if (current) title = `正在检测第 ${stats.currentIndex} 个商品，共 ${stats.productCount} 个`
-  else if (job.value?.state === 'RUNNING') title = stats.processed === stats.productCount ? '正在汇总检测结果' : '正在准备检测下一个商品'
+  else if (job.value?.state === 'RUNNING') title = stats.processed === stats.productCount ? '正在保存检测结果' : '正在准备检测下一个商品'
   else if (job.value?.state === 'COMPLETED') title = '检测已结束'
   return { title, current, processed: stats.processed, failed: stats.failed, percent: stats.productCount ? Math.floor(stats.processed * 100 / stats.productCount) : 0 }
 })
@@ -460,7 +461,21 @@ async function resumeCurrentTask() {
     if (!disposed && job.value?.id === id) await load(id)
   } catch (e) { error(e) } finally { busy.value = false }
 }
-async function stop(){try{const id=job.value.id;await api.cancelTask(id);await load(id)}catch(e){error(e)}}
+const stopBusy=ref(false)
+async function stop(){
+  if(!job.value||!active.value||stopBusy.value||job.value.cancelRequested)return
+  const id=job.value.id
+  stopBusy.value=true
+  try{
+    const {data}=await api.cancelTask(id)
+    if(!disposed&&job.value?.id===id){
+      job.value.cancelRequested=!!data.cancelRequested
+      if(data.cancelRequested)ElMessage.success('已收到停止请求，正在结束当前操作')
+      else ElMessage.info('检测已结束，正在更新结果')
+      await load(id,false)
+    }
+  }catch(e){error(e)}finally{stopBusy.value=false}
+}
 // 使用浏览器本地导出时间；全角冒号兼容 Windows 文件名限制。
 function passedExportFileName() {
   const now = new Date()
@@ -524,14 +539,27 @@ const hits=computed(()=>{
       return {...line,points:[[l,t],[r,t],[r,b],[l,b]].map(p=>p.join(',')).join(' '),left:Math.min(92,l/w*100),top:t/h*100}
     })
 })
-const previewFailed=ref(false)
-function clearPicture(){previewFailed.value=false;pictureSequence++;if(previewUrl.value)URL.revokeObjectURL(previewUrl.value);previewUrl.value='';picture.value=null}
-// 识别失败的图片可能没有本地预览，使用已有原图链接供人工核查，不重新执行 OCR。
+const previewFailed=ref(false),previewLoaded=ref(false)
+let previewTimer
+function clearPicture(){
+  clearTimeout(previewTimer)
+  previewFailed.value=false;previewLoaded.value=false;pictureLoading.value=false
+  pictureSequence++;previewUrl.value='';picture.value=null
+}
+function settlePreview(seq,loaded){
+  if(seq!==pictureSequence||!pictureVisible.value||disposed)return
+  clearTimeout(previewTimer)
+  previewLoaded.value=loaded;previewFailed.value=!loaded;pictureLoading.value=false
+}
+function finishPreview(event,loaded){
+  settlePreview(Number(event.target.dataset.sequence),loaded)
+}
+// 浏览器直接加载该次检测保存的商品原图 URL，叠加 OCR 坐标；失败时不读取本地或云端预览。
 async function openPicture(p,index){
   clearPicture()
   pictureProductMatched.value=!!isMatched(p)
   const seq=pictureSequence
-  let selected=p.pictures[index]
+  const selected=p.pictures[index]
   const taskId=job.value.id
   picture.value=selected
   pictureTitle.value=`${selected.kind==='MAIN'?'主图':'详情图'} ${selected.index} · ${p.title || p.itemId}`
@@ -540,19 +568,14 @@ async function openPicture(p,index){
   try{
     const {data}=await api.getPictureDetail(taskId,p.itemId,index)
     if(seq!==pictureSequence||!pictureVisible.value||disposed)return
-    selected=data;picture.value=data
-    if(selected.error && !selected.previewKey){
-      const url=new URL(selected.url)
-      if(url.protocol!=='https:')throw new Error('原图链接不可用')
-      previewUrl.value=url.href
-    }else{
-      const blob=await api.getPicture(taskId,p.itemId,index)
-      if(seq===pictureSequence&&pictureVisible.value&&!disposed)previewUrl.value=URL.createObjectURL(blob)
-    }
+    picture.value=data
+    const source=String(data.url||'').trim()
+    const url=new URL(source.startsWith('//') ? `https:${source}` : source)
+    if(!['https:','http:'].includes(url.protocol))throw new Error('原图链接不可用')
+    previewUrl.value=url.href
+    previewTimer=setTimeout(()=>settlePreview(seq,false),20000)
   }catch(e){
-    if(seq===pictureSequence){previewFailed.value=true;error(e)}
-  }finally{
-    if(seq===pictureSequence)pictureLoading.value=false
+    if(seq===pictureSequence&&pictureVisible.value&&!disposed){settlePreview(seq,false);error(e)}
   }
 }
 

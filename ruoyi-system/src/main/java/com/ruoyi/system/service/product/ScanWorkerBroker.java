@@ -117,7 +117,7 @@ public class ScanWorkerBroker {
             // A slow disk write for one product must not block claims/heartbeats for all machines.
             if (!t.lock.tryLock()) continue;
             try {
-                if (t.done || t.attempts >= 3) continue;
+                if (t.done || t.attempts >= 3 || t.stopped.getAsBoolean()) continue;
                 if (t.worker != null && t.deadline > now) continue;
                 if (t.firstAssignedAt == 0) t.firstAssignedAt = now;
                 t.worker = m.workerId; t.session = m.session; t.deadline = now + LEASE_MS; t.attempts++;
