@@ -1,0 +1,8 @@
+# 台式机：复制为 JAR 所在目录的 application.yml
+app:
+  role: worker
+worker:
+  server-url: https://YOUR_DOMAIN/prod-api/product/scan-worker/
+  token: "替换成与云端相同的至少32位随机密钥"
+  concurrency: 4
+  ocr-threads: 1

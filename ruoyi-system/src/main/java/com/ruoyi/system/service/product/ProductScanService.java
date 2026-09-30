@@ -4,7 +4,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.StandardCopyOption;
-import java.security.MessageDigest;
 import java.time.Instant;
 import java.time.Duration;
 import java.time.LocalDate;
@@ -12,7 +11,6 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
-import java.util.HexFormat;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -26,15 +24,18 @@ import jakarta.annotation.PreDestroy;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONWriter;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.system.utils.taobao.TaobaoFetchException;
 import com.ruoyi.system.utils.taobao.TaobaoProductInfo;
 import static com.ruoyi.system.service.product.ScanModels.*;
+import com.ruoyi.system.service.product.ProductDetectionEngine.Cached;
 
 /** 单实例任务队列。快照原子写入私有目录，重启不自动重复付费请求。 */
 @Service
 public class ProductScanService
 {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(ProductScanService.class);
     @org.springframework.beans.factory.annotation.Autowired
     private com.ruoyi.system.mapper.ProductWhitelistMapper productWhitelistMapper;
 
@@ -43,6 +44,9 @@ public class ProductScanService
 
     @org.springframework.beans.factory.annotation.Autowired
     private com.ruoyi.system.service.IProductWordLibraryService productWordLibraryService;
+
+    @org.springframework.beans.factory.annotation.Autowired
+    private ScanWorkerBroker remoteWorker;
 
     /** 首次执行时读取完整启用规则，后续停止、重启和重试沿用快照。 */
     private void captureWhitelist(Job job)
@@ -86,8 +90,16 @@ public class ProductScanService
             });
 
     public ProductScanService(@Value("${product.scan.storage:${user.home}/.product-filter/scans}") String storage,
-            @Value("${onebound.key:}") String key, @Value("${onebound.secret:}") String secret, @Value("${product.scan.daily-limit:5000}") int dailyLimit)
+            @Value("${onebound.key:}") String key, @Value("${onebound.secret:}") String secret, @Value("${product.scan.daily-limit:5000}") int dailyLimit,
+            @Value("${product.scan.concurrency:3}") int concurrency,
+            @Value("${product.scan.remote.enabled:false}") boolean remoteEnabled,
+            @Value("${product.scan.remote.max-inflight:32}") int remoteMaxInflight)
     {
+        if (remoteMaxInflight < 1 || remoteMaxInflight > 128) throw new IllegalArgumentException("remote.max-inflight must be 1..128");
+        this.productConcurrency = remoteEnabled ? remoteMaxInflight : Math.max(1, Math.min(8, concurrency));
+        this.productExecutor = java.util.concurrent.Executors.newFixedThreadPool(productConcurrency, runnable -> {
+            Thread thread = new Thread(runnable, "product-worker"); thread.setDaemon(true); return thread;
+        });
         this.storage = Path.of(storage).toAbsolutePath();
         this.gateway = new ScanGateway(key, secret);
         this.dailyLimit = dailyLimit > 0 ? dailyLimit : 5000;
@@ -122,7 +134,7 @@ public class ProductScanService
                 }
             }
         }
-        catch (Exception e) { throw new IllegalStateException("无法读取商品任务目录，请检查目录权限或快照文件", e); }
+        catch (Exception e) { throw new IllegalStateException("Cannot restore product scan tasks from " + this.storage, e); }
     }
 
     private void loadUsage()
@@ -284,7 +296,7 @@ public class ProductScanService
         }
         if (request == null || request.items == null || request.items.isEmpty() || request.items.size() > 10_000)
             throw new ServiceException("每次请导入 1 至 10,000 条商品记录（不含表头）");
-        Request rules = JSON.parseObject(JSON.toJSONString(request), Request.class);
+        Request rules = JSON.parseObject(JSON.toJSONString(request, JSONWriter.Feature.LargeObject), Request.class);
         validateThreshold(rules.confidenceThreshold);
         if (ScanRules.words(rules.titleWords).isEmpty() || (ScanRules.words(rules.imageWords).isEmpty() && !rules.detectPhones && !rules.detectQrCodes))
             throw new ServiceException("请填写标题过滤词，并填写图片过滤词、手机号检测或二维码检测");
@@ -303,7 +315,8 @@ public class ProductScanService
         {
             if (job.ownerId == owner && active(job)) throw new ServiceException("你已有进行中的任务，请等待完成或先停止");
         }
-        gateway.checkReady();
+        remoteWorker.checkAvailable();
+        gateway.checkReady(!remoteWorker.enabled());
         Job job = new Job(); job.id = UUID.randomUUID().toString(); job.ownerId = owner;
         job.createdAt = Instant.now().toString(); job.rules = rules;
         captureWhitelist(job);
@@ -350,7 +363,8 @@ public class ProductScanService
             if (history.values().stream().anyMatch(v -> jobs.get(v.id()).ownerId == owner
                     && Set.of("QUEUED", "RUNNING").contains(v.state())))
                 throw new ServiceException("你已有进行中的任务，请等待完成或先停止");
-            gateway.checkReady();
+            remoteWorker.checkAvailable();
+            gateway.checkReady(!remoteWorker.enabled());
             captureWhitelist(job);
             String oldState = job.state, oldError = job.error;
             boolean oldCancel = job.cancelRequested;
@@ -678,7 +692,8 @@ public class ProductScanService
             if (!job.recheckItemIds.isEmpty()) throw new ServiceException("还有未完成的命中项重检，请点击继续任务");
             List<String> ids = job.products.stream().filter(p -> "MATCHED".equals(p.verdict)).map(p -> p.itemId).toList();
             if (ids.isEmpty()) throw new ServiceException("没有需要重新检测的命中项");
-            gateway.checkReady();
+            remoteWorker.checkAvailable();
+            gateway.checkReady(!remoteWorker.enabled());
             Request latestRules = latestRecheckRules(job, input);
             Job latest = new Job();
             captureWhitelist(latest);
@@ -720,6 +735,7 @@ public class ProductScanService
             List<String> ids = job.products.stream().filter(ProductScanService::retryable)
                     .filter(p -> itemId == null || itemId.equals(p.itemId)).map(p -> p.itemId).toList();
             if (ids.isEmpty()) throw new ServiceException("没有可重试的获取异常商品，已下架或非获取异常商品不参与");
+            remoteWorker.checkAvailable();
             captureWhitelist(job);
             String oldState = job.state, oldError = job.error, oldOnly = job.retryOnlyItemId;
             List<String> oldIds = job.retryItemIds;
@@ -764,9 +780,16 @@ public class ProductScanService
 
     public byte[] image(long owner, String id, String itemId, int pictureIndex)
     {
-        String key = publishedPicture(owner, id, itemId, pictureIndex).previewKey;
+        Picture picture = publishedPicture(owner, id, itemId, pictureIndex);
+        String key = picture.previewKey;
         if (key == null || !key.matches("[a-f0-9]{64}")) throw new ServiceException("图片预览尚未就绪");
-        try { return Files.readAllBytes(storage.resolve("assets").resolve(key + ".jpg")); }
+        try {
+            Path assets = storage.resolve("assets");
+            if (!Files.exists(assets.resolve(key + ".jpg")) && remoteWorker.enabled())
+                throw new ServiceException("当前为不传图测试模式，预览图保留在检测电脑，云端暂不可查看");
+            return Files.readAllBytes(assets.resolve(key + ".jpg"));
+        }
+        catch (ServiceException e) { throw e; }
         catch (Exception e) { throw new ServiceException("预览文件不可用"); }
     }
 
@@ -873,10 +896,11 @@ public class ProductScanService
         };
     }
 
-    /** 全服务共享三个商品工作线程，多个清单不会叠加为六路或更多并发。 */
-    private final java.util.concurrent.ExecutorService productExecutor = java.util.concurrent.Executors.newFixedThreadPool(3, runnable -> {
-        Thread thread = new Thread(runnable, "product-worker"); thread.setDaemon(true); return thread;
-    });
+    public int executionCapacity() { return productConcurrency; }
+
+    /** 本机模式默认三并发；远程模式使用独立的集群派发上限。 */
+    private final java.util.concurrent.ExecutorService productExecutor;
+    private final int productConcurrency;
 
     private void run(Job job)
     {
@@ -897,9 +921,10 @@ public class ProductScanService
             Map<String, Cached> cache = new ConcurrentHashMap<>();
             boolean rechecking = !job.recheckItemIds.isEmpty();
             Request activeRules = rechecking && job.recheckRules != null ? job.recheckRules : job.rules;
-            ScanRules.PreparedWords titleWords = ScanRules.prepare(activeRules.titleWords), imageWords = ScanRules.prepare(activeRules.imageWords);
+            ScanRules.PreparedWords titleWords = remoteWorker.enabled() ? null : ScanRules.prepare(activeRules.titleWords),
+                    imageWords = remoteWorker.enabled() ? null : ScanRules.prepare(activeRules.imageWords);
             Set<String> recheckIds = new java.util.HashSet<>(job.recheckItemIds);
-            ScanWhitelist whitelist = new ScanWhitelist(rechecking ? job.recheckWhitelist : job.whitelistRules);
+            ScanWhitelist whitelist = remoteWorker.enabled() ? null : new ScanWhitelist(rechecking ? job.recheckWhitelist : job.whitelistRules);
             Map<String, List<String>> importedTitles = ScanCsvSource.titles(job.rules.sourceCsv, job.rules.platform);
             Set<String> retryIds = new java.util.HashSet<>(job.retryItemIds);
             if (job.retryOnlyItemId != null) retryIds.add(job.retryOnlyItemId);
@@ -913,8 +938,31 @@ public class ProductScanService
                 pending.add(p);
             }
             var quotaReached = new java.util.concurrent.atomic.AtomicBoolean();
+            if (remoteWorker.enabled()) {
+                // Each submission handles ONE product. Other users' jobs can enter the shared pool between products.
+                var completion = new java.util.concurrent.ExecutorCompletionService<Boolean>(productExecutor);
+                java.util.function.Consumer<Product> submit = p -> completion.submit(() -> {
+                    if (stopping(job) || quotaReached.get()) return false;
+                    return processProduct(job, p, rechecking, retrying, activeRules, titleWords, imageWords,
+                            whitelist, importedTitles, cache);
+                });
+                int inFlight = 0;
+                for (int i = 0; i < productConcurrency; i++) {
+                    Product p = pending.poll(); if (p == null) break; submit.accept(p); inFlight++;
+                }
+                java.util.concurrent.ExecutionException failure = null;
+                while (inFlight > 0) {
+                    try { if (!completion.take().get()) quotaReached.set(true); }
+                    catch (java.util.concurrent.ExecutionException e) { quotaReached.set(true); failure = e; }
+                    inFlight--;
+                    if (!stopping(job) && !quotaReached.get()) {
+                        Product p = pending.poll(); if (p != null) { submit.accept(p); inFlight++; }
+                    }
+                }
+                if (failure != null) throw failure;
+            } else {
             var workers = new ArrayList<java.util.concurrent.CompletableFuture<Void>>();
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < productConcurrency; i++)
             {
                 workers.add(java.util.concurrent.CompletableFuture.runAsync(() -> {
                     while (!stopping(job) && !quotaReached.get())
@@ -928,11 +976,14 @@ public class ProductScanService
             }
             // 全部已领取商品结束后才能发布任务完成状态，不能提前汇总或允许再次执行。
             java.util.concurrent.CompletableFuture.allOf(workers.toArray(java.util.concurrent.CompletableFuture[]::new)).join();
+            }
             synchronized (job)
             {
                 job.retryOnlyItemId = null;
                 job.retryItemIds = new ArrayList<>();
-                job.state = stopping(job) ? "CANCELLED" : "COMPLETED";
+                job.state = stopping(job) ? "CANCELLED"
+                        : remoteWorker.enabled() && job.products.stream().anyMatch(p -> "INTERRUPTED".equals(p.state))
+                            ? "INTERRUPTED" : "COMPLETED";
                 job.completedAt = Instant.now().toString();
                 job.durationMillis = previousDuration + Math.max(0, System.currentTimeMillis() - segmentStarted);
                 for (Product p : job.products) if ("PENDING".equals(p.state)) { p.state = "CANCELLED"; p.incomplete = true; }
@@ -972,178 +1023,66 @@ public class ProductScanService
     {
         try
         {
-            if (rechecking)
+            if (remoteWorker.enabled())
             {
-                synchronized (job)
-                {
-                    // 首次处理该命中商品才清理旧判定，继续时保留已经重新识别的图片。
-                    if ("MATCHED".equals(p.verdict))
-                    {
-                        p.titleHits = new ArrayList<>(); p.pictures.clear(); p.warnings.clear();
-                        p.importedTitleChecked = false; p.providerFetched = false;
-                        p.title = null; p.error = null; p.incomplete = false;
-                        p.review = "NONE"; p.reviewNote = null; p.reviewedAt = null;
-                        p.verdict = "REVIEW"; p.state = "PENDING";
-                        save(job);
-                    }
-                }
-            }
-            // 必须在预占额度、调用商品接口之前匹配导入标题。
-            List<String> titles = importedTitles.getOrDefault(p.itemId, List.of());
-            if (!titles.isEmpty())
-            {
-                synchronized (job)
-                {
-                    if (!p.importedTitleChecked)
-                    {
-                        p.title = titles.get(0);
-                        p.titleHits = List.of();
-                        for (String title : titles)
-                        {
-                            List<String> hits = titleWords.match(title, false, true, whitelist);
-                            if (!hits.isEmpty()) { p.title = title; p.titleHits = hits; break; }
-                        }
-                        p.importedTitleChecked = true;
-                    }
-                    if (!p.titleHits.isEmpty())
-                    {
-                        p.state = "DONE"; p.verdict = "MATCHED";
-                        p.error = null; p.incomplete = false;
-                        save(job);
-                        return true;
-                    }
-                }
-            }
-            if (retrying || !p.providerFetched || p.title == null)
-            {
-            synchronized (job) { p.state = "FETCHING"; save(job); }
-            // 缓存查询在额度预占之前；只有数据库没有商品信息时才调用第三方并计费。
-            var product = productInfoCacheService.getOrFetch(p.platform, p.itemId, () -> fetchAndCharge(p));
-            if (product == null)
-            {
-                synchronized (job)
-                {
-                    job.error = "DAILY_LIMIT_EXCEEDED";
-                    if (!retrying) { p.state = "PENDING"; p.error = "DAILY_LIMIT_EXCEEDED"; p.incomplete = true; }
-                    else p.state = "FAILED";
-                    save(job);
-                }
-                return false;
-            }
-            synchronized (job)
-            {
-                if (retrying)
-                {
-                    p.retryCount++; p.error = null; p.incomplete = false;
-                    p.verdict = "REVIEW"; p.title = null; p.titleHits = new ArrayList<>(); p.pictures.clear();
-                    p.warnings.clear();
-                }
-            }
-            synchronized (job)
-            {
-                p.providerFetched = true;
-                p.price = product.getPriceText(); p.categoryName = product.getCategoryName();
-                p.shopUrl = product.getShopUrl(); p.sales = product.getSales(); p.commentCount = product.getCommentCount();
-                // 有导入标题时已完成匹配，接口标题不再参与判定；无标题才在此补检。
-                p.title = titles.isEmpty() ? product.getTitle() : titles.get(0);
-                p.titleHits = titles.isEmpty() ? titleWords.match(p.title, false, true, whitelist) : List.of();
-                p.warnings.add("检测范围为接口实际返回内容；未命中词库不代表平台合规或上游图片完整");
-                addPictures(p, "MAIN", product.getMainImages()); addPictures(p, "DETAIL", product.getDetailImages());
-                p.state = "SCANNING"; save(job);
-            }
-            }
-            synchronized (job)
-            {
-                p.error = null;
-                p.incomplete = p.pictures.stream().anyMatch(pic -> "FAILED".equals(pic.state)
-                        || (pic.ocr != null && pic.ocr.lines.stream().anyMatch(line -> line.score < threshold(job))));
-                p.state = "SCANNING";
-            }
-            // 标题或中断前的图片已经命中时，直接保留不通过结果，不再下载剩余图片。
-            if (!p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0))
-            {
-                synchronized (job)
-                {
-                    p.state = "DONE";
-                    p.verdict = "MATCHED";
-                    save(job);
-                }
-                return true;
-            }
-            for (Picture pic : p.pictures)
-            {
-                if (stopping(job)) break;
-                if (Set.of("DONE", "FAILED", "SKIPPED").contains(pic.state)) continue;
-                synchronized (job) { pic.state = "SCANNING"; save(job); }
-                try
-                {
-                    Cached cached = cache.computeIfAbsent(pic.url, url -> {
-                        try {
-                        ScanGateway.Inspection inspection = gateway.inspect(pic.url);
-                        String key = HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(inspection.preview()));
-                        Path dest = storage.resolve("assets").resolve(key + ".jpg");
-                        if (!Files.exists(dest))
-                        {
-                            Path tmp = Files.createTempFile(storage.resolve("assets"), "preview-", ".tmp");
-                            try { Files.write(tmp, inspection.preview()); Files.move(tmp, dest, StandardCopyOption.REPLACE_EXISTING); }
-                            finally { Files.deleteIfExists(tmp); }
-                        }
-                        return new Cached(inspection.ocr(), key, inspection.qrCodes());
-                        } catch (Exception e) { throw new IllegalStateException(e); }
-                    });
-                    Set<String> hits = new LinkedHashSet<>();
-                    Ocr evidence = new Ocr();
-                    evidence.width = cached.ocr.width; evidence.height = cached.ocr.height; evidence.engine = cached.ocr.engine;
-                    // 不修改复用的原始OCR缓存，保存本行实际命中，避免将已放行的其他行再次标红。
-                    for (Line original : cached.ocr.lines)
-                    {
-                        Line line = new Line(); line.text = original.text; line.score = original.score; line.box = original.box;
-                        line.hits = imageWords.match(line.text, activeRules.detectPhones, false, whitelist);
-                        hits.addAll(line.hits); evidence.lines.add(line);
-                    }
-                    synchronized (job)
-                    {
-                        pic.ocr = evidence; pic.previewKey = cached.key; pic.hits = List.copyOf(hits); pic.qrCodes = activeRules.detectQrCodes ? cached.qrCodes : 0; pic.state = "DONE";
-                        if (pic.ocr.lines.stream().anyMatch(line -> line.score < threshold(job)))
-                        { p.incomplete = true; p.warnings.add(pic.kind + pic.index + " 有低置信度文字，请人工核查"); }
-                        save(job);
-                    }
-                    // 当前图片已经命中时，商品确定不通过，跳过同一商品剩余图片。
-                    if (!hits.isEmpty() || (activeRules.detectQrCodes && cached.qrCodes > 0))
-                    {
-                        synchronized (job)
-                        {
-                            boolean current = false;
-                            for (Picture remaining : p.pictures)
-                            {
-                                if (remaining == pic) { current = true; continue; }
-                                if (current && "PENDING".equals(remaining.state)) remaining.state = "SKIPPED";
+                // Copy only execution rules; do not serialize the whole execution-list CSV for every product.
+                Request suppliedRules = new Request();
+                suppliedRules.platform = activeRules.platform;
+                suppliedRules.titleWords = activeRules.titleWords; suppliedRules.imageWords = activeRules.imageWords;
+                suppliedRules.detectPhones = activeRules.detectPhones; suppliedRules.detectQrCodes = activeRules.detectQrCodes;
+                suppliedRules.confidenceThreshold = activeRules.confidenceThreshold;
+                List<WhitelistRule> suppliedWhitelist = rechecking ? job.recheckWhitelist : job.whitelistRules;
+                remoteWorker.execute(p, suppliedRules, suppliedWhitelist,
+                        importedTitles.getOrDefault(p.itemId, List.of()), rechecking, retrying,
+                        () -> productInfoCacheService.getOrFetch(p.platform, p.itemId, () -> fetchAndCharge(p)),
+                        storage.resolve("assets"),
+                        () -> stopping(job), updated -> {
+                            synchronized (job) {
+                                p.title = updated.title; p.titleHits = updated.titleHits;
+                                p.price = updated.price; p.categoryName = updated.categoryName; p.shopUrl = updated.shopUrl;
+                                p.sales = updated.sales; p.commentCount = updated.commentCount;
+                                p.providerFetched = updated.providerFetched; p.importedTitleChecked = updated.importedTitleChecked;
+                                p.retryCount = updated.retryCount; p.review = updated.review;
+                                p.reviewNote = updated.reviewNote; p.reviewedAt = updated.reviewedAt;
+                                p.pictures = updated.pictures; p.state = updated.state;
+                                p.verdict = updated.verdict; p.error = updated.error;
+                                p.incomplete = updated.incomplete; p.warnings = updated.warnings;
+                                // Aggregate frequent multi-machine progress; final results are ALWAYS durably saved before ACK.
+                                if (Set.of("DONE", "FAILED", "INTERRUPTED").contains(p.state)
+                                        || job.updatedAt == null || Duration.between(Instant.parse(job.updatedAt), Instant.now()).toMillis() >= 5000)
+                                    save(job);
                             }
-                            save(job);
-                        }
-                        break;
-                    }
-                }
-                catch (Exception e)
-                {
-                    synchronized (job) { pic.state = "FAILED"; pic.error = "图片读取或识别失败"; p.incomplete = true; save(job); }
+                        });
+                if ("DAILY_LIMIT_EXCEEDED".equals(p.error)) {
+                    synchronized (job) { job.error = p.error; save(job); }
+                    return false;
                 }
             }
-            synchronized (job)
+            else
             {
-                boolean unfinished = p.pictures.stream().anyMatch(pic -> !"DONE".equals(pic.state) && !"SKIPPED".equals(pic.state));
-                p.incomplete |= unfinished;
-                p.state = stopping(job) ? "CANCELLED" : "DONE";
-                p.verdict = !p.titleHits.isEmpty() || p.pictures.stream().anyMatch(pic -> !pic.hits.isEmpty() || pic.qrCodes > 0) ? "MATCHED"
-                        : p.incomplete ? "REVIEW" : "CLEAR";
-                save(job);
+                if (!ProductDetectionEngine.prepareCompiled(p, titleWords, whitelist,
+                        importedTitles.getOrDefault(p.itemId, List.of()), rechecking, retrying,
+                        () -> productInfoCacheService.getOrFetch(p.platform, p.itemId, () -> fetchAndCharge(p)),
+                        job, () -> save(job), () -> job.error = "DAILY_LIMIT_EXCEEDED")) return false;
+                if ("DONE".equals(p.state) && !p.titleHits.isEmpty()) return true;
+                ProductDetectionEngine.executePrepared(p, activeRules, threshold(job), imageWords,
+                        whitelist, cache, storage.resolve("assets"), gateway, job,
+                        () -> stopping(job), () -> save(job));
             }
+        }
+        catch (ScanWorkerBroker.Unavailable e)
+        {
+            synchronized (job) {
+                p.state = "INTERRUPTED"; p.incomplete = true; p.error = e.getMessage();
+                job.error = e.getMessage(); save(job);
+            }
+            return false;
         }
         catch (Exception e)
         {
             synchronized (job)
             {
-                p.state = "FAILED"; p.incomplete = true;
+                p.state = stopping(job) ? "CANCELLED" : "FAILED"; p.incomplete = true;
                 p.error = e instanceof TaobaoFetchException ? ((TaobaoFetchException) e).getCode().name() : "商品获取或任务处理失败";
                 save(job);
             }
@@ -1159,17 +1098,6 @@ public class ProductScanService
         return true;
     }
 
-    private void addPictures(Product p, String kind, List<String> urls)
-    {
-        int index = 0;
-        for (String url : urls)
-        {
-            if (p.pictures.size() >= 200)
-            { p.incomplete = true; p.warnings.add("超过单商品 200 张处理上限，有图片未检测"); break; }
-            Picture pic = new Picture(); pic.kind = kind; pic.index = ++index; pic.url = url; p.pictures.add(pic);
-        }
-    }
-
     /** 所有任务操作均检查归属，避免用户凭任务 ID 读取或修改他人数据。 */
     private Job owned(long owner, String id)
     {
@@ -1179,21 +1107,34 @@ public class ProductScanService
     }
     private static boolean active(Job job) { return "QUEUED".equals(job.state) || "RUNNING".equals(job.state); }
     private static boolean stopping(Job job) { synchronized (job) { return job.cancelRequested || Thread.currentThread().isInterrupted(); } }
-    private static Job copy(Job job) { return JSON.parseObject(JSON.toJSONString(job), Job.class); }
+    private static Job copy(Job job) { return JSON.parseObject(JSON.toJSONString(job, JSONWriter.Feature.LargeObject), Job.class); }
     /** 先写临时文件再替换快照，减少中断时损坏历史数据的风险。 */
     private void save(Job job)
     {
         job.updatedAt = Instant.now().toString();
         Path temp = null;
+        String stage = "create temporary file";
         try
         {
             temp = Files.createTempFile(storage, "scan-", ".tmp");
-            Files.writeString(temp, JSON.toJSONString(job));
+            stage = "serialize and write task";
+            // 大清单含完整 CSV/OCR，可能超过 Fastjson 默认 64M 数组限制。
+            // 直接写 UTF-8，避免先构造完整 JSON String 再转码；仍保留临时文件原子替换。
+            try (var output = Files.newOutputStream(temp)) {
+                JSON.writeTo(output, job, JSONWriter.Feature.LargeObject);
+            }
+            stage = "replace task snapshot";
             Files.move(temp, storage.resolve(job.id + ".json"), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
+            stage = "publish task in memory";
             history.put(job.id, summary(job));
             publish(job);
         }
-        catch (Exception e) { throw new ServiceException("任务保存失败，请检查磁盘空间及目录权限"); }
+        catch (Exception e) {
+            log.error("Product scan save failed: stage={}, directory={}, taskId={}", stage, storage, job.id, e);
+            ServiceException failure = new ServiceException("任务保存失败，请查看服务器日志中的具体原因");
+            failure.initCause(e);
+            throw failure;
+        }
         finally { if (temp != null) try { Files.deleteIfExists(temp); } catch (Exception ignored) { } }
     }
     @PreDestroy
@@ -1203,5 +1144,5 @@ public class ProductScanService
         executor.shutdown();
         productExecutor.shutdown();
     }
-    private record Cached(Ocr ocr, String key, int qrCodes) { }
+
 }

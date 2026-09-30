@@ -18,12 +18,17 @@ import com.ruoyi.system.service.IProductExecutionListService;
 public class ProductScanController
 {
     private final ProductScanService service;
+    private final com.ruoyi.system.service.product.ScanWorkerBroker workers;
     private final IProductExecutionListService executionListService;
-    public ProductScanController(ProductScanService service, IProductExecutionListService executionListService)
+    public ProductScanController(ProductScanService service, IProductExecutionListService executionListService, com.ruoyi.system.service.product.ScanWorkerBroker workers)
     {
-        this.service = service;
+        this.service = service; this.workers = workers;
         this.executionListService = executionListService;
     }
+
+    @GetMapping("/workers")
+    @PreAuthorize("@ss.hasRole('admin')")
+    public AjaxResult workers() { return AjaxResult.success(java.util.Map.of("maxInflight", service.executionCapacity(), "workers", workers.workers())); }
 
     /** 从执行清单指定的范围读取商品，创建异步检测任务。 */
     @PostMapping("/tasks")

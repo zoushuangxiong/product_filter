@@ -162,3 +162,12 @@ xss:
 onebound:
   key: "t3178249375"
   secret: "9375ff95"
+
+app:
+  role: worker
+
+worker:
+  server-url: http://8.130.138.170/prod-api/product/scan-worker/
+  token: "k7ouKeq1OPX2Bv80FkONMdVXQnmUG1PI"
+  concurrency: 4
+  ocr-threads: 1

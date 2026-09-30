@@ -1,0 +1,14 @@
+# Merge into external cloud configuration; remote execution is OFF by default.
+app:
+  role: server
+product:
+  scan:
+    # Only used by cloud-local OCR mode; remote mode has its own ceiling below.
+    concurrency: 3
+    remote:
+      enabled: true
+      token: "替换成与台式机相同的至少32位随机密钥"
+      # Total dispatched products across ALL workers (1..128); tune after load testing.
+      max-inflight: 32
+      # Global cache/provider proxy calls; adding desktops must not flood the provider.
+      fetch-concurrency: 4

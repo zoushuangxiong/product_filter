@@ -16,10 +16,11 @@ public class ScanGateway
     public ScanGateway(String key, String secret) { this.key = key; this.secret = secret; }
 
     /** 创建任务前校验凭据并加载模型，避免模型未就绪时消耗商品查询次数。 */
-    public void checkReady()
+    public void checkReady(boolean loadOcr)
     {
         if (key == null || key.isBlank() || secret == null || secret.isBlank())
             throw new ServiceException("暂时无法获取商品信息");
+        if (!loadOcr) return;
         try { EmbeddedOcr.initialize(); }
         catch (Exception | LinkageError e)
         {

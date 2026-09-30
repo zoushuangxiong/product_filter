@@ -16,6 +16,13 @@ import org.locationtech.jts.operation.buffer.BufferParameters;
 final class EmbeddedOcr
 {
     private static java.util.concurrent.BlockingQueue<EmbeddedOcr> pool;
+    private static int instances = 3, threads = 2;
+    static synchronized void configureWorker(int concurrency, int intraThreads) {
+        if (pool != null) throw new IllegalStateException("OCR already initialized");
+        if (concurrency < 1 || concurrency > 8 || intraThreads < 1 || intraThreads > 4)
+            throw new IllegalArgumentException("Invalid OCR concurrency");
+        instances = concurrency; threads = intraThreads;
+    }
     private final OrtEnvironment env = OrtEnvironment.getEnvironment();
     // det 定位文字区域，cls 判断文字方向，rec 识别文字。
     private final OrtSession det, cls, rec;
@@ -25,10 +32,10 @@ final class EmbeddedOcr
     static synchronized void initialize() throws Exception
     {
         if (pool != null) return;
-        var created = new java.util.concurrent.ArrayBlockingQueue<EmbeddedOcr>(3);
+        var created = new java.util.concurrent.ArrayBlockingQueue<EmbeddedOcr>(instances);
         try
         {
-            for (int i = 0; i < 3; i++) created.add(new EmbeddedOcr());
+            for (int i = 0; i < instances; i++) created.add(new EmbeddedOcr());
             pool = created;
         }
         catch (Exception | LinkageError e)
@@ -52,11 +59,15 @@ final class EmbeddedOcr
     private EmbeddedOcr() throws Exception
     {
         nu.pattern.OpenCV.loadLocally();
-        Core.setNumThreads(2);
+        Core.setNumThreads(threads);
         OrtSession detector = null, classifier = null, recognizer = null;
         try (var options = new OrtSession.SessionOptions())
         {
-            options.setIntraOpNumThreads(2); options.setInterOpNumThreads(1);
+            options.setIntraOpNumThreads(threads); options.setInterOpNumThreads(1);
+            if (threads == 1) {
+                options.addConfigEntry("session.intra_op.allow_spinning", "0");
+                options.addConfigEntry("session.inter_op.allow_spinning", "0");
+            }
             detector = session("ch_PP-OCRv4_det_infer.onnx", options);
             classifier = session("ch_ppocr_mobile_v2.0_cls_infer.onnx", options);
             recognizer = session("ch_PP-OCRv4_rec_infer.onnx", options);
