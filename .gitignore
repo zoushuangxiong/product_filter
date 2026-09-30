@@ -45,3 +45,6 @@ nbdist/
 !*/build/*.java
 !*/build/*.html
 !*/build/*.xml
+
+# Desktop worker runtime data (previews, pending results, machine identity)
+scan-worker-data/
