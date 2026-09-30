@@ -6,7 +6,11 @@ import java.util.*;
 import java.util.function.BooleanSupplier;
 import static com.ruoyi.system.service.product.ScanModels.*;
 
-/** 共用检测入口：只接收参数，不查询词库、白名单、执行单或业务数据库。 */
+/**
+ * 云端本机与远程工作机共用的检测算法，不查询词库、白名单或执行单数据库。
+ * prepare 先匹配导入标题，再按需获取商品；execute 逐图 OCR，命中后跳过剩余图片。
+ * 共享数据的修改及 changed 回调在调用方提供的锁内执行，下载/OCR 不持有该锁。
+ */
 public final class ProductDetectionEngine
 {
     public record Cached(Ocr ocr, String key, int qrCodes) { }

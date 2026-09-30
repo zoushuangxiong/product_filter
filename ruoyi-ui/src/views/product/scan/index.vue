@@ -117,7 +117,45 @@
       <el-alert v-if="recheckLoadError" :title="recheckLoadError" type="error" :closable="false" />
     </el-dialog>
     <el-dialog v-model="pictureVisible" :title="pictureTitle" width="90%" class="picture-dialog" append-to-body @closed="clearPicture">
-      <div v-if="picture" class="picture-grid" v-loading="pictureLoading"><div class="preview-frame"><img v-if="previewUrl && !previewFailed" :key="pictureSequence" :data-sequence="pictureSequence" :src="previewUrl" alt="商品核查图片" referrerpolicy="no-referrer" @load="finishPreview($event, true)" @error="finishPreview($event, false)"><el-empty v-if="previewFailed" description="图片读取失败，原图暂时无法加载，请稍后再试"/><svg v-if="previewLoaded && picture.ocr" preserveAspectRatio="none" :viewBox="`0 0 ${picture.ocr.width} ${picture.ocr.height}`"><template v-for="(hit,index) in hits" :key="index"><polygon :points="hit.points" fill="none" stroke="white" stroke-width="4" vector-effect="non-scaling-stroke"/><polygon :points="hit.points" fill="none" :stroke="hit.matched ? '#e11d2e' : '#c87500'" stroke-width="2" vector-effect="non-scaling-stroke"/></template></svg><template v-if="previewLoaded"><span v-for="(hit,index) in hits" :key="index" class="hit-marker" :style="{left: hit.left+'%', top: hit.top+'%', background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</span></template></div><div><p v-if="picture.error" class="error">图片读取或识别失败，请对照原图人工核查。</p><p v-if="picture.hits.length">命中词：{{ picture.hits.join('、') }}</p><p v-if="!pictureProductMatched && hasLowConfidence(picture)" class="muted">橙框标记识别置信度低于 {{ Math.round(confidenceThreshold * 100) }}% 的文字，请对照原图核查。</p><div v-for="(hit,index) in hits" :key="index" class="hit-line"><b :style="{background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</b><div>{{ hit.text }}<div class="muted">{{ hit.matched ? '命中词库' : '待核查文字' }}<span v-if="hit.lowConfidence"> · 低置信度 {{ (hit.score*100).toFixed(1) }}%</span></div></div></div><p v-if="!hits.length">文字位置暂不可用，请结合原图复核。</p></div></div>
+      <div v-if="picture" class="picture-grid" v-loading="pictureLoading">
+        <div class="preview-frame">
+          <img v-if="previewUrl && !previewFailed" :key="pictureSequence"
+            :data-sequence="pictureSequence" :src="previewUrl" alt="商品核查图片"
+            referrerpolicy="no-referrer" @load="finishPreview($event, true)" @error="finishPreview($event, false)">
+          <el-empty v-if="previewFailed" description="图片读取失败，原图暂时无法加载，请稍后再试" />
+          <!-- OCR 坐标属于检测原图；SVG 随当前显示尺寸缩放，不重新执行识别。 -->
+          <svg v-if="previewLoaded && picture.ocr" preserveAspectRatio="none"
+            :viewBox="`0 0 ${picture.ocr.width} ${picture.ocr.height}`">
+            <template v-for="(hit,index) in hits" :key="index">
+              <polygon :points="hit.points" fill="none" stroke="white" stroke-width="4" vector-effect="non-scaling-stroke" />
+              <polygon :points="hit.points" fill="none" :stroke="hit.matched ? '#e11d2e' : '#c87500'"
+                stroke-width="2" vector-effect="non-scaling-stroke" />
+            </template>
+          </svg>
+          <template v-if="previewLoaded">
+            <span v-for="(hit,index) in hits" :key="index" class="hit-marker"
+              :style="{left: hit.left+'%', top: hit.top+'%', background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</span>
+          </template>
+        </div>
+        <div>
+          <p v-if="picture.error" class="error">图片读取或识别失败，请对照原图人工核查。</p>
+          <p v-if="picture.hits.length">命中词：{{ picture.hits.join('、') }}</p>
+          <p v-if="!pictureProductMatched && hasLowConfidence(picture)" class="muted">
+            橙框标记识别置信度低于 {{ Math.round(confidenceThreshold * 100) }}% 的文字，请对照原图核查。
+          </p>
+          <div v-for="(hit,index) in hits" :key="index" class="hit-line">
+            <b :style="{background: hit.matched ? '#e11d2e' : '#c87500'}">{{ index+1 }}</b>
+            <div>
+              {{ hit.text }}
+              <div class="muted">
+                {{ hit.matched ? '命中词库' : '待核查文字' }}
+                <span v-if="hit.lowConfidence"> · 低置信度 {{ (hit.score*100).toFixed(1) }}%</span>
+              </div>
+            </div>
+          </div>
+          <p v-if="!hits.length">文字位置暂不可用，请结合原图复核。</p>
+        </div>
+      </div>
     </el-dialog>
     <el-dialog v-model="reviewVisible" :title="pendingReview?.decision === 'TRUSTED' ? '信任本商品' : '排除本商品'" width="500px" append-to-body><el-form label-position="top"><el-form-item label="复核原因（选填）"><el-input v-model="reviewNote" type="textarea" :rows="4" maxlength="500" placeholder="可留空"/></el-form-item></el-form><p class="muted">仅影响当前任务，保留原始词库和命中证据。</p><template #footer><el-button @click="reviewVisible=false">取消</el-button><el-button type="primary" :loading="reviewBusy" @click="saveReview">保存复核</el-button></template></el-dialog>
   </div>
@@ -390,6 +428,7 @@ async function retry(row){
   catch(e){ error(e) }
   finally{ retryBusy.value=false }
 }
+// 每次查询携带序号，旧任务/旧筛选条件的迟到响应不能覆盖当前页面。
 function poll(){clearTimeout(timer);if(active.value&&!disposed)timer=setTimeout(()=>load(job.value.id,false),1500)}
 async function load(id,showLoading=true,attempt=0){
   loadUsage()
@@ -461,6 +500,7 @@ async function resumeCurrentTask() {
     if (!disposed && job.value?.id === id) await load(id)
   } catch (e) { error(e) } finally { busy.value = false }
 }
+// 服务端确认停止信号后继续轮询，等待在途操作收尾；不要在前端提前标记任务已结束。
 const stopBusy=ref(false)
 async function stop(){
   if(!job.value||!active.value||stopBusy.value||job.value.cancelRequested)return
@@ -541,6 +581,7 @@ const hits=computed(()=>{
 })
 const previewFailed=ref(false),previewLoaded=ref(false)
 let previewTimer
+// 关闭或切换图片时使旧请求、旧 img 事件和定时器失效。
 function clearPicture(){
   clearTimeout(previewTimer)
   previewFailed.value=false;previewLoaded.value=false;pictureLoading.value=false

@@ -4,7 +4,6 @@ import com.alibaba.fastjson2.JSON;
 import java.net.URI;
 import java.net.http.*;
 import java.nio.channels.FileChannel;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.time.Duration;
 import java.util.*;
@@ -13,7 +12,10 @@ import java.util.concurrent.atomic.*;
 import static com.ruoyi.system.service.product.ScanModels.*;
 import static com.ruoyi.system.service.product.ScanWorkerProtocol.*;
 
-/** 同一 JAR 通过标准 Spring Boot 配置选择角色；工作机不启动 Spring 服务。 */
+/**
+ * 同一 JAR 通过 application.yml 选择角色；worker 只加载配置，不启动 Web、数据库或 Redis。
+ * 每个线程领取一个商品，心跳/进度独立发送；最终结果先存 outbox，再重试直到云端确认。
+ */
 public final class ScanWorkerMain {
     public static boolean startIfConfigured(String[] args) {
         var config = loadConfiguration(args);
@@ -112,7 +114,7 @@ public final class ScanWorkerMain {
                 else remove(dir);
             }
         }
-        System.out.println("对比测试模式：不上传图片，仅回传检测结果；预览图保留在本机 previews 目录");
+        System.out.println("检测结果只回传文字和坐标，网页使用商品原图链接预览");
         EmbeddedOcr.configureWorker(concurrency, ocrThreads);
         EmbeddedOcr.initialize();
         System.out.println("工作机 " + workerId + " 已启动：商品并发=" + concurrency + "，OCR内部线程=" + ocrThreads + "；等待云端任务");
@@ -142,6 +144,7 @@ public final class ScanWorkerMain {
             }
         }
     }
+    /** 单商品生命周期：续租、检测、本地落盘、回传；退出时只清理尚未形成最终结果的目录。 */
     private void execute(Input input) throws Exception {
         long began = System.nanoTime();
         Path dir = data.resolve("outbox").resolve(UUID.randomUUID().toString());
@@ -235,6 +238,7 @@ public final class ScanWorkerMain {
         }
         throw new CancellationException();
     }
+    /** 网络故障保留结果重试；失效租约丢弃，凭证/协议错误停止工作机并保留文件供排查。 */
     private void deliver(Path dir) throws Exception {
         Saved saved = JSON.parseObject(Files.readAllBytes(dir.resolve("result.json")), Saved.class);
         if (saved.input.version != 4 || saved.input.session == null) {
@@ -260,7 +264,7 @@ public final class ScanWorkerMain {
         }
         throw new InterruptedException();
     }
-    /** 保留按内容哈希命名的预览图，检测结果确认后也不删除；供以后按需查看。 */
+    /** 保留旧版本约定的本地预览归档；当前网页直接使用原图 URL，不会读取或上传这些文件。 */
     private void cachePreviews(Path assets) throws Exception {
         Path previews = data.resolve("previews"); Files.createDirectories(previews);
         try (var files = Files.list(assets)) {

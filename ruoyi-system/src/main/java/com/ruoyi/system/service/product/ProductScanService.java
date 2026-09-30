@@ -31,7 +31,11 @@ import com.ruoyi.system.utils.taobao.TaobaoProductInfo;
 import static com.ruoyi.system.service.product.ScanModels.*;
 import com.ruoyi.system.service.product.ProductDetectionEngine.Cached;
 
-/** 单实例任务队列。快照原子写入私有目录，重启不自动重复付费请求。 */
+/**
+ * 云端任务生命周期、权限、额度及结果存储入口；检测算法由 ProductDetectionEngine 共用。
+ * 修改任务数据时持有 Job 锁，查询使用已发布快照，停止信号通过 volatile 字段独立传递。
+ * 快照原子写入私有目录；重启只恢复结果，不自动重新发起付费查询。
+ */
 @Service
 public class ProductScanService
 {
@@ -217,7 +221,6 @@ public class ProductScanService
         return value == 0.4 || value == 0.5 || value == 0.6 ? value : 0.6;
     }
 
-    /** 临时网络错误最多再试两次；明确的商品或权限错误立即结束。 */
     /** 仅缓存未命中时执行；预占额度和成功扣量均限定在真实接口调用范围内。 */
     private TaobaoProductInfo fetchAndCharge(Product product)
     {
@@ -236,10 +239,11 @@ public class ProductScanService
         return result;
     }
 
+    /** 临时网络错误最多重试一次，含首次共两次调用；明确的商品或权限错误立即结束。 */
     private TaobaoProductInfo fetchWithRetry(Product product)
     {
         TaobaoFetchException last = null;
-        for (int attempt = 0; attempt <= 2; attempt++)
+        for (int attempt = 0; attempt <= 1; attempt++)
         {
             try { return gateway.fetch(product.itemId, product.platform); }
             catch (TaobaoFetchException e)
@@ -247,7 +251,7 @@ public class ProductScanService
                 last = e;
                 if (!Set.of(TaobaoFetchException.Code.TIMEOUT, TaobaoFetchException.Code.NETWORK_ERROR,
                         TaobaoFetchException.Code.HTTP_ERROR, TaobaoFetchException.Code.PROVIDER_ERROR,
-                        TaobaoFetchException.Code.RATE_LIMITED).contains(e.getCode()) || attempt == 2) throw e;
+                        TaobaoFetchException.Code.RATE_LIMITED).contains(e.getCode()) || attempt == 1) throw e;
                 try { Thread.sleep(800L * (attempt + 1)); }
                 catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw e; }
             }
@@ -779,6 +783,7 @@ public class ProductScanService
         }
     }
 
+    /** 兼容旧版网页的云端预览接口；新版网页通过 evidence 返回的 url 加载原图。 */
     public byte[] image(long owner, String id, String itemId, int pictureIndex)
     {
         Picture picture = publishedPicture(owner, id, itemId, pictureIndex);
@@ -903,6 +908,7 @@ public class ProductScanService
     private final java.util.concurrent.ExecutorService productExecutor;
     private final int productConcurrency;
 
+    /** 派发本轮待处理商品并等待全部退出后统一收尾，避免停止时提前允许另一轮检测。 */
     private void run(Job job)
     {
         long segmentStarted = System.currentTimeMillis();
@@ -1036,7 +1042,6 @@ public class ProductScanService
                 remoteWorker.execute(p, suppliedRules, suppliedWhitelist,
                         importedTitles.getOrDefault(p.itemId, List.of()), rechecking, retrying,
                         () -> productInfoCacheService.getOrFetch(p.platform, p.itemId, () -> fetchAndCharge(p)),
-                        storage.resolve("assets"),
                         () -> stopping(job), updated -> {
                             synchronized (job) {
                                 if (stopping(job)) throw new java.util.concurrent.CancellationException();
@@ -1119,7 +1124,11 @@ public class ProductScanService
     private static boolean active(Job job) { return "QUEUED".equals(job.state) || "RUNNING".equals(job.state); }
     private static boolean stopping(Job job) { return job.cancelRequested || Thread.currentThread().isInterrupted(); }
     private static Job copy(Job job) { return JSON.parseObject(JSON.toJSONString(job, JSONWriter.Feature.LargeObject), Job.class); }
-    /** 先写临时文件再替换快照，减少中断时损坏历史数据的风险。 */
+    /**
+     * 在 Job 锁内先写临时文件，再原子替换，成功后发布只读查询快照。
+     * 当前仍是整单持久化，含原始 CSV 和 OCR 坐标；不可用“先确认、后保存”降低回传等待，
+     * 否则工作机会删除 outbox，云端故障时丢失已确认结果。
+     */
     private void save(Job job)
     {
         job.updatedAt = Instant.now().toString();

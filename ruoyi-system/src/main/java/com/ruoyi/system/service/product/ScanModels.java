@@ -62,6 +62,7 @@ public final class ScanModels
         /** 是否仍有未执行完的商品（不含获取异常）。 */
         public boolean resumable;
         public volatile String state = "QUEUED";
+        /** 无锁停止信号：控制请求不能等待序列化整单时持有的 Job 锁。 */
         public volatile boolean cancelRequested;
         public String error;
         public Request rules;

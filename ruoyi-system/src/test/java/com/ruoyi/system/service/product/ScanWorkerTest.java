@@ -11,6 +11,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static com.ruoyi.system.service.product.ScanModels.*;
 import static com.ruoyi.system.service.product.ScanWorkerProtocol.*;
 
+/** 检测判定、计费代理、租约和大清单存储的回归测试，不访问真实付费接口。 */
 class ScanWorkerTest {
     @TempDir Path dir;
     private static final String TOKEN = "test-worker-secret-0123456789abcdef";
@@ -69,7 +70,7 @@ class ScanWorkerTest {
         ExecutorService exec = Executors.newSingleThreadExecutor();
         try {
             Future<?> work = exec.submit(() -> {
-                try { broker.execute(p,new Request(),List.of(),dir,()->false,result -> {
+                try { broker.execute(p,new Request(),List.of(),()->false,result -> {
                     if (failSave.getAndSet(false)) throw new IllegalStateException("disk write failed");
                     commits.incrementAndGet();
                 }); } catch(Exception e) { throw new RuntimeException(e); }
@@ -88,7 +89,7 @@ class ScanWorkerTest {
         ExecutorService exec = Executors.newSingleThreadExecutor();
         try {
             Future<?> work = exec.submit(() -> {
-                assertThrows(CancellationException.class,()->broker.execute(product(),new Request(),List.of(),dir,cancelled::get,p -> fail("must not save cancelled result")));
+                assertThrows(CancellationException.class,()->broker.execute(product(),new Request(),List.of(),cancelled::get,p -> fail("must not save cancelled result")));
             });
             Input input = claim(broker,"desktop-01"); cancelled.set(true);
             Message m = message(input,"desktop-01"); m.product=input.product; m.product.state="DONE"; m.product.verdict="CLEAR";
@@ -102,7 +103,7 @@ class ScanWorkerTest {
         try {
             Product p = product(); p.titleHits = List.of("hit");
             Future<?> work = exec.submit(() -> {
-                try { broker.execute(p,new Request(),List.of(),dir,()->false,result -> {}); }
+                try { broker.execute(p,new Request(),List.of(),()->false,result -> {}); }
                 catch(Exception e) { throw new RuntimeException(e); }
             });
             Input old = claim(broker,"old-worker"); now.addAndGet(120001);
@@ -113,13 +114,13 @@ class ScanWorkerTest {
             assertTrue(broker.complete(result).accepted); work.get(5,TimeUnit.SECONDS);
         } finally { exec.shutdownNow(); }
     }
-    @Test void previewHashRequiredButUploadNotRequiredForComparison() throws Exception {
+    @Test void previewHashRequiredButImageBytesAreNotUploaded() throws Exception {
         ScanWorkerBroker broker = new ScanWorkerBroker(true,TOKEN);
         ExecutorService exec = Executors.newSingleThreadExecutor();
         try {
             Product p = product(); p.pictures = new ArrayList<>(List.of(p.pictures.get(0)));
             Future<?> work = exec.submit(() -> {
-                try { broker.execute(p,new Request(),List.of(),dir,()->false,result -> {}); }
+                try { broker.execute(p,new Request(),List.of(),()->false,result -> {}); }
                 catch(Exception e) { throw new RuntimeException(e); }
             });
             Input input = claim(broker,"desktop-01");
@@ -127,9 +128,8 @@ class ScanWorkerTest {
             report.product.state="DONE";report.product.verdict="CLEAR";
             Picture pic=report.product.pictures.get(0);pic.state="DONE";pic.ocr=new Ocr();
             assertThrows(IllegalArgumentException.class,()->broker.complete(report));
-            Message upload=message(input,"desktop-01");upload.artifact=new byte[]{(byte)0xff,(byte)0xd8,1,2,3};
-            upload.artifactKey=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(upload.artifact));
-            pic.previewKey=upload.artifactKey;
+            byte[] preview = new byte[]{(byte)0xff,(byte)0xd8,1,2,3};
+            pic.previewKey=HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(preview));
             assertFalse(Files.exists(dir.resolve(pic.previewKey + ".jpg")));
             assertTrue(broker.complete(report).accepted);work.get(5,TimeUnit.SECONDS);
         } finally {exec.shutdownNow();}
@@ -241,7 +241,7 @@ class ScanWorkerTest {
                     calls.incrementAndGet();entered.countDown();
                     try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException e){throw new RuntimeException(e);}
                     return new com.ruoyi.system.utils.taobao.TaobaoProductInfo("title",List.of(),"1",List.of(),"","","","");
-                },dir,()->false,result->{});}catch(Exception e){throw new RuntimeException(e);}
+                },()->false,result->{});}catch(Exception e){throw new RuntimeException(e);}
             });
             Input input=claim(broker,"desktop-01");assertEquals(0,calls.get());
             Message message=message(input,"desktop-01");
@@ -274,7 +274,7 @@ class ScanWorkerTest {
         List<Future<?>> jobs=new ArrayList<>();
         try {
             for(int i=0;i<2;i++)jobs.add(exec.submit(()->{
-                try{broker.execute(product(),new Request(),List.of(),dir,()->false,p->{});}catch(Exception e){throw new RuntimeException(e);}
+                try{broker.execute(product(),new Request(),List.of(),()->false,p->{});}catch(Exception e){throw new RuntimeException(e);}
             }));
             Message a=message(null,"machine-a");a.capacity=1;
             Input first=null;long deadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
@@ -293,7 +293,7 @@ class ScanWorkerTest {
         CountDownLatch saving=new CountDownLatch(1),release=new CountDownLatch(1);
         try {
             Future<?> slowJob=exec.submit(()->{
-                try{broker.execute(product(),new Request(),List.of(),dir,()->false,p->{
+                try{broker.execute(product(),new Request(),List.of(),()->false,p->{
                     saving.countDown();try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException e){throw new RuntimeException(e);}
                 });}catch(Exception e){throw new RuntimeException(e);}
             });
@@ -301,7 +301,7 @@ class ScanWorkerTest {
             result.product.titleHits=List.of("hit");result.product.state="DONE";result.product.verdict="MATCHED";
             Future<?> commit=exec.submit(()->broker.complete(result));assertTrue(saving.await(5,TimeUnit.SECONDS));
             Future<?> fastJob=exec.submit(()->{
-                try{broker.execute(product(),new Request(),List.of(),dir,()->false,p->{});}catch(Exception e){throw new RuntimeException(e);}
+                try{broker.execute(product(),new Request(),List.of(),()->false,p->{});}catch(Exception e){throw new RuntimeException(e);}
             });
             Future<Input> fastClaim=exec.submit(()->claim(broker,"fast"));Input fast=fastClaim.get(1,TimeUnit.SECONDS);
             assertTrue(broker.heartbeat(message(fast,"fast")).accepted);
@@ -327,7 +327,7 @@ class ScanWorkerTest {
                     try{release.await(5,TimeUnit.SECONDS);}catch(InterruptedException e){throw new RuntimeException(e);}
                     finally{active.decrementAndGet();}
                     return new com.ruoyi.system.utils.taobao.TaobaoProductInfo("title",List.of(),"1",List.of(),"","","","");
-                },dir,()->false,p->{});}catch(Exception e){throw new RuntimeException(e);}
+                },()->false,p->{});}catch(Exception e){throw new RuntimeException(e);}
             }));
             Input a=claim(broker,"a"),b=claim(broker,"b");
             Future<?> fa=exec.submit(()->{try{return broker.fetch(message(a,"a"));}catch(Exception e){throw new RuntimeException(e);}});
@@ -349,7 +349,11 @@ class ScanWorkerTest {
         EmbeddedOcr.configureWorker(1,1);
         var inspection=EmbeddedOcr.inspectPooled(bytes.toByteArray());
         assertTrue(inspection.ocr().lines.stream().anyMatch(l->l.text.contains("123456")));
-        Message m=new Message();m.artifact=inspection.preview();
-        assertArrayEquals(m.artifact,JSON.parseObject(JSON.toJSONBytes(m),Message.class).artifact);
+        Message m=new Message(); m.product=product();
+        m.product.pictures.get(0).ocr=inspection.ocr();
+        Message restored=JSON.parseObject(JSON.toJSONBytes(m),Message.class);
+        assertEquals(inspection.ocr().width,restored.product.pictures.get(0).ocr.width);
+        assertEquals(inspection.ocr().lines.get(0).text,restored.product.pictures.get(0).ocr.lines.get(0).text);
+        assertEquals(inspection.ocr().lines.get(0).box,restored.product.pictures.get(0).ocr.lines.get(0).box);
     }
 }

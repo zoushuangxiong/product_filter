@@ -93,7 +93,7 @@ public final class ScanWorkerJarIT {
                         () -> {
                             fetchCalls.incrementAndGet();
                             return new com.ruoyi.system.utils.taobao.TaobaoProductInfo("demo provider title",List.of(),"1",List.of(),"","","","");
-                        },dir,()->false,result->{
+                        },()->false,result->{
                         if(!"DONE".equals(result.state))return;
                         if(!"MATCHED".equals(result.verdict))throw new AssertionError("Wrong result");
                         try {Files.writeString(dir.resolve("result-"+n+".json"),JSON.toJSONString(result));}

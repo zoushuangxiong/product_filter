@@ -20,7 +20,7 @@ public class ScanWorkerController {
     @PostMapping("/{operation}")
     public ResponseEntity<?> exchange(@PathVariable("operation") String operation, HttpServletRequest request) throws Exception {
         if (!broker.authenticate(request.getHeader("X-Scan-Worker-Token"))) return ResponseEntity.status(401).build();
-        // Bound body reads after authentication; preview uploads use this same private protocol.
+        // 先校验机器凭证，再限制 JSON 读取量；结果可含大量 OCR 坐标，但不接收图片上传。
         byte[] body = request.getInputStream().readNBytes(28 * 1024 * 1024 + 1);
         if (body.length > 28 * 1024 * 1024) return ResponseEntity.status(413).build();
         try {

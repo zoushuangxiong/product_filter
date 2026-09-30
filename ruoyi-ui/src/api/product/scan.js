@@ -16,7 +16,6 @@ async function binary(url, params) {
   }
   return blob
 }
-export const getPicture = (id, itemId, index) => binary(`${base}/${id}/products/${itemId}/images/${index}`)
 export const exportTask = (id, eligibleOnly) => binary(`${base}/${id}/export`, { eligibleOnly })
 
 export const getPictureDetail = (id, itemId, index) => request({ url: `${base}/${id}/products/${itemId}/images/${index}/detail` })

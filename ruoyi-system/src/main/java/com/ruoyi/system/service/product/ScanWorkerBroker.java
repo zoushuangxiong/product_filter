@@ -4,7 +4,6 @@ import com.alibaba.fastjson2.JSON;
 import com.ruoyi.common.exception.ServiceException;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
-import java.nio.file.*;
 import java.security.MessageDigest;
 import java.nio.charset.StandardCharsets;
 import java.util.*;
@@ -13,7 +12,11 @@ import java.util.function.*;
 import static com.ruoyi.system.service.product.ScanModels.*;
 import static com.ruoyi.system.service.product.ScanWorkerProtocol.*;
 
-/** 云端适配层。原 Job 快照仍是任务记录；重启沿用原有 INTERRUPTED/人工继续语义。 */
+/**
+ * 云端商品派发与租约管理，不执行 OCR，也不保存工作机图片。
+ * Job 快照是最终任务记录；本类只保留在途租约和短期确认回执，重启后人工继续任务。
+ * 注册表使用实例锁，单商品回传使用 Ticket.lock；写盘回调不得持有实例锁，避免阻塞其他机器。
+ */
 @Component
 public class ScanWorkerBroker {
     public static class Conflict extends RuntimeException { }
@@ -41,7 +44,6 @@ public class ScanWorkerBroker {
         final java.util.concurrent.locks.ReentrantLock lock = new java.util.concurrent.locks.ReentrantLock();
         int attempts;
         volatile boolean done;
-        Path assets;
         BooleanSupplier stopped;
         Consumer<Product> changed;
         Supplier<com.ruoyi.system.utils.taobao.TaobaoProductInfo> fetch;
@@ -71,21 +73,22 @@ public class ScanWorkerBroker {
     public boolean authenticate(String supplied) {
         return enabled && supplied != null && MessageDigest.isEqual(token.getBytes(StandardCharsets.UTF_8), supplied.getBytes(StandardCharsets.UTF_8));
     }
-    public void execute(Product product, Request rules, List<WhitelistRule> whitelist, Path assets,
+    /** 已有商品信息时的简化入口，与完整派发共用租约和结果确认逻辑。 */
+    public void execute(Product product, Request rules, List<WhitelistRule> whitelist,
             BooleanSupplier stopped, Consumer<Product> changed) throws Exception {
         execute(product, rules, whitelist, List.of(), false, false,
-                () -> { throw new IllegalStateException("No product source configured"); }, assets, stopped, changed);
+                () -> { throw new IllegalStateException("No product source configured"); }, stopped, changed);
     }
     public void execute(Product product, Request rules, List<WhitelistRule> whitelist,
             List<String> importedTitles, boolean rechecking, boolean retrying,
-            Supplier<com.ruoyi.system.utils.taobao.TaobaoProductInfo> fetch, Path assets,
+            Supplier<com.ruoyi.system.utils.taobao.TaobaoProductInfo> fetch,
             BooleanSupplier stopped, Consumer<Product> changed) throws Exception {
         Ticket ticket = new Ticket(); ticket.created = clock.getAsLong(); ticket.input = new Input();
         ticket.input.taskId = UUID.randomUUID().toString();
         ticket.input.product = copy(product); ticket.input.rules = rules; ticket.input.whitelist = whitelist;
         ticket.input.importedTitles = List.copyOf(importedTitles);
         ticket.input.rechecking = rechecking; ticket.input.retrying = retrying; ticket.fetch = fetch;
-        ticket.assets = assets; ticket.stopped = stopped; ticket.changed = changed;
+        ticket.stopped = stopped; ticket.changed = changed;
         synchronized (this) { purge(); tickets.put(ticket.input.taskId, ticket); }
         try {
             while (true) {
@@ -107,6 +110,7 @@ public class ScanWorkerBroker {
             }
         }
     }
+    /** 同一进程只能领取自身容量以内的商品；到期租约允许重派，旧租约随后失效。 */
     public synchronized Input claim(Message m) {
         register(m); purge();
         long now = clock.getAsLong();
@@ -144,6 +148,7 @@ public class ScanWorkerBroker {
                 .sorted(Comparator.comparing(WorkerStatus::workerId)).toList();
     }
     /** 工作机决定何时获取商品；云端只提供受租约约束的缓存/额度/第三方代理，不执行检测。 */
+    /** 延迟获取商品信息；并发重试共享同一 Future，包括错误和额度不足的结果。 */
     public FetchReply fetch(Message m) throws Exception {
         Ticket t = ticket(m); boolean first; CompletableFuture<FetchReply> memo;
         Supplier<com.ruoyi.system.utils.taobao.TaobaoProductInfo> source;
@@ -192,6 +197,7 @@ public class ScanWorkerBroker {
             reply.cancel = t.stopped.getAsBoolean(); return reply;
         } finally { t.lock.unlock(); }
     }
+    /** 进度仅用于展示，不能把商品提前标为完成；完成必须经过持久化确认。 */
     public Reply progress(Message m) {
         Ticket t = ticket(m); t.lock.lock();
         try {
@@ -204,6 +210,7 @@ public class ScanWorkerBroker {
             return accepted();
         } finally { t.lock.unlock(); }
     }
+    /** 写盘成功后确认；短期保留回执，使 HTTP 响应丢失后的重传不会重复改动结果。 */
     public Reply complete(Message m) {
         Ticket t = ticket(m); t.lock.lock();
         try {
@@ -219,7 +226,7 @@ public class ScanWorkerBroker {
             t.completion.complete(null);
             // Receipt needs identity only; release potentially large rules, OCR and Job-capturing callbacks.
             t.input.product = null; t.input.rules = null; t.input.whitelist = null; t.input.importedTitles = List.of();
-            t.changed = null; t.stopped = null; t.assets = null; t.fetch = null; t.fetched = null;
+            t.changed = null; t.stopped = null; t.fetch = null; t.fetched = null;
             return accepted();
         } finally { t.lock.unlock(); }
     }
