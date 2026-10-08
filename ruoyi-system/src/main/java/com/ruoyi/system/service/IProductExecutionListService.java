@@ -13,6 +13,13 @@ import com.ruoyi.system.service.product.ScanModels;
 public interface IProductExecutionListService
 {
     /**
+     * 校验当前角色是否可访问指定清单
+     *
+     * @param id 清单主键
+     */
+    public void checkProductExecutionListDataScope(Long id);
+
+    /**
      * 按当前账号的历史获取成功记录过滤清单
      * @param id 清单主键
      * @return 包含过滤前后数量的清单

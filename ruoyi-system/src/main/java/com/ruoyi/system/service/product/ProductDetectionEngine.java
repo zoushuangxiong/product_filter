@@ -82,8 +82,7 @@ public final class ProductDetectionEngine
                 synchronized (lock)
                 {
                     quotaReached.run();
-                    if (!retrying) { p.state = "PENDING"; p.error = "DAILY_LIMIT_EXCEEDED"; p.incomplete = true; }
-                    else p.state = "FAILED";
+                    p.state = "PENDING"; p.error = "DAILY_LIMIT_EXCEEDED"; p.incomplete = true;
                     changed.run();
                 }
                 return false;

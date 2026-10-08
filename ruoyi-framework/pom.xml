@@ -16,6 +16,13 @@
     </description>
 
     <dependencies>
+        <!-- JUnit/Spring Test：验证角色数据权限切面及请求上下文。 -->
+        <dependency>
+            <groupId>org.junit.jupiter</groupId><artifactId>junit-jupiter</artifactId><scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>org.springframework</groupId><artifactId>spring-test</artifactId><scope>test</scope>
+        </dependency>
 
         <!-- SpringBoot Web容器 -->
          <dependency>
@@ -61,4 +68,7 @@
 
     </dependencies>
 
+    <build><plugins><plugin>
+        <groupId>org.apache.maven.plugins</groupId><artifactId>maven-surefire-plugin</artifactId><version>3.5.4</version>
+    </plugin></plugins></build>
 </project>

@@ -66,7 +66,7 @@
       <template #header><div class="card-heading"><div><h2>检测结果</h2><p>查看命中内容、人工复核与导出结果</p></div></div></template>
       <div class="toolbar">
         <el-select :model-value="job?.id" :disabled="resultsLoading || historyLoading" placeholder="选择历史任务" style="width:330px" @change="load"><el-option v-for="task in tasks" :key="task.id" :value="task.id" :label="taskLabel(task)"/></el-select>
-        <el-button :loading="historyLoading" :disabled="resultsLoading" @click="refresh">刷新</el-button><el-button :loading="stopBusy" :disabled="!active || job?.cancelRequested || stopBusy" @click="stop">{{ job?.cancelRequested ? '正在停止' : '停止任务' }}</el-button>
+        <el-button :loading="historyLoading" :disabled="resultsLoading" @click="refresh">刷新</el-button><el-button :loading="stopBusy" :disabled="(!active && job?.state !== 'WAITING_QUOTA') || job?.cancelRequested || stopBusy" @click="stop">{{ job?.cancelRequested ? '正在停止' : '停止任务' }}</el-button>
         <el-button v-if="job" type="primary" icon="VideoPlay" :loading="busy" :disabled="active || busy || retryBusy || resultsLoading || historyLoading || !job.resumable" @click="resumeCurrentTask">继续任务</el-button>
       </div>
       <el-alert v-if="resultsError" :title="resultsError" type="error" :closable="false" show-icon/>
@@ -80,7 +80,8 @@
             <span v-if="job.cancelRequested && active">正在停止，请稍候…</span>
           </div>
         </div>
-        <el-alert v-if="job.error" :title="errorText(job.error)" type="error" :closable="false"/>
+        <el-alert v-if="job.state === 'WAITING_QUOTA'" :title="`今日额度已用完，将于 ${job.quotaResumeDate || '次日'} 00:00 后自动继续（北京时间）；停止任务可取消自动继续。`" type="warning" :closable="false"/>
+        <el-alert v-else-if="job.error" :title="errorText(job.error)" type="error" :closable="false"/>
         <div class="summary"><div>商品总数<strong>{{ pageStats.productCount }}</strong></div><div class="summary-matched">命中词库<strong>{{ pageStats.matched }}</strong></div><div class="summary-review">待复核<strong>{{ pageStats.review }}</strong></div><div class="summary-incomplete">未完成<strong>{{ pageStats.incomplete }}</strong></div><div class="summary-provider-error">商品信息获取异常<strong>{{ pageStats.providerError }}</strong></div><div class="summary-unavailable">商品已下架<strong>{{ pageStats.unavailable }}</strong></div><div class="summary-passed">已通过<strong>{{ pageStats.passed }}</strong></div></div>
         <div class="toolbar"><el-select v-model="filter" style="width:180px"><el-option label="全部结果" value="ALL"/><el-option label="命中词库" value="MATCHED"/><el-option label="待复核" value="REVIEW"/><el-option label="未完成" value="INCOMPLETE"/><el-option label="商品信息获取异常" value="PROVIDER_ERROR"/><el-option label="商品已下架" value="ITEM_UNAVAILABLE"/><el-option label="通过（可导出）" value="ELIGIBLE"/></el-select><el-button type="danger" icon="Refresh" :loading="retryBusy" :disabled="active || retryBusy || resultsLoading || !pageStats.retryable" @click="retryAll">一键重试获取异常（{{ pageStats.retryable || 0 }}）</el-button><el-button type="warning" icon="Refresh" :loading="retryBusy" :disabled="active || retryBusy || resultsLoading || !pageStats.matched" @click="recheckMatched">重新检测命中项（{{ pageStats.matched || 0 }}）</el-button><el-button @click="download(false)">导出全部 CSV</el-button><el-button type="primary" plain @click="download(true)">导出通过项 CSV</el-button></div>
         <div class="confidence-controls">
@@ -294,7 +295,7 @@ function refreshExecutionLists() { executionPage = 1; fetchExecutionLists(); if 
 const tasks=ref([]), job=ref(null), filter=ref('ALL'), busy=ref(false), retryBusy=ref(false)
 const resultsLoading=ref(true), historyLoading=ref(false), resultsError=ref('')
 let timer, disposed=false, requestSequence=0
-const labels={QUEUED:'排队中',RUNNING:'检测中',COMPLETED:'执行结束',CANCELLED:'已停止',INTERRUPTED:'服务重启中断',FAILED:'失败',PENDING:'待处理',FETCHING:'获取商品',SCANNING:'识别图片',DONE:'完成',MATCHED:'命中词库',REVIEW:'待复核',CLEAR:'未命中',NONE:'未复核',TRUSTED:'人工信任',REJECTED:'人工排除'}
+const labels={QUEUED:'排队中',RUNNING:'检测中',WAITING_QUOTA:'等待额度恢复',COMPLETED:'执行结束',CANCELLED:'已停止',INTERRUPTED:'服务重启中断',FAILED:'失败',PENDING:'待处理',FETCHING:'获取商品',SCANNING:'识别图片',DONE:'完成',MATCHED:'命中词库',REVIEW:'待复核',CLEAR:'未命中',NONE:'未复核',TRUSTED:'人工信任',REJECTED:'人工排除'}
 const label=s=>labels[s]||s
 const productUrl=p=>p.platform==='1688'
   ? `https://detail.1688.com/offer/${encodeURIComponent(p.itemId)}.html`
@@ -429,7 +430,16 @@ async function retry(row){
   finally{ retryBusy.value=false }
 }
 // 每次查询携带序号，旧任务/旧筛选条件的迟到响应不能覆盖当前页面。
-function poll(){clearTimeout(timer);if(active.value&&!disposed)timer=setTimeout(()=>load(job.value.id,false),1500)}
+function poll(){
+  clearTimeout(timer)
+  if(disposed)return
+  if(active.value)timer=setTimeout(()=>load(job.value.id,false),1500)
+  else if(job.value?.state==='WAITING_QUOTA' && job.value.quotaResumeDate){
+    // 等待额度期间只安排次日的一次刷新，不持续请求结果。
+    const delay=new Date(`${job.value.quotaResumeDate}T00:00:03+08:00`).getTime()-Date.now()
+    if(delay>0 && delay<2147483647)timer=setTimeout(()=>load(job.value.id,false),delay)
+  }
+}
 async function load(id,showLoading=true,attempt=0){
   loadUsage()
   clearTimeout(timer)
@@ -503,14 +513,14 @@ async function resumeCurrentTask() {
 // 服务端确认停止信号后继续轮询，等待在途操作收尾；不要在前端提前标记任务已结束。
 const stopBusy=ref(false)
 async function stop(){
-  if(!job.value||!active.value||stopBusy.value||job.value.cancelRequested)return
+  if(!job.value||(!active.value&&job.value.state!=='WAITING_QUOTA')||stopBusy.value||job.value.cancelRequested)return
   const id=job.value.id
   stopBusy.value=true
   try{
     const {data}=await api.cancelTask(id)
     if(!disposed&&job.value?.id===id){
       job.value.cancelRequested=!!data.cancelRequested
-      if(data.cancelRequested)ElMessage.success('已收到停止请求，正在结束当前操作')
+      if(data.cancelRequested)ElMessage.success(data.state==='CANCELLED'?'已停止，已取消自动继续':'已收到停止请求，正在结束当前操作')
       else ElMessage.info('检测已结束，正在更新结果')
       await load(id,false)
     }

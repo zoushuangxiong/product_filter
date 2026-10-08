@@ -10,7 +10,10 @@
     <el-table v-loading="loading" :data="rows" row-key="id">
       <el-table-column label="编号" prop="id" width="90"/>
       <el-table-column label="词库名称" prop="name" min-width="180" show-overflow-tooltip/>
+      <el-table-column label="标题词条数量" prop="titleWordCount" width="140" align="center"/>
+      <el-table-column label="图片文字词条数量" prop="imageWordCount" width="160" align="center"/>
       <el-table-column label="检测手机号" width="120"><template #default="{ row }">{{ row.detectPhones ? '是' : '否' }}</template></el-table-column>
+      <el-table-column label="检测二维码" width="120"><template #default="{ row }">{{ row.detectQrCodes ? '是' : '否' }}</template></el-table-column>
       <el-table-column label="创建时间" prop="createTime" width="180"/>
       <el-table-column label="修改时间" prop="updateTime" width="180"/>
       <el-table-column label="操作" width="200"><template #default="{ row }">
@@ -44,10 +47,12 @@ const dialog = ref(false), saving = ref(false), readOnly = ref(false), formRef =
 const blank = () => ({ id: null, name: '', titleWords: '', imageWords: '', detectPhones: false, detectQrCodes: false })
 const form = reactive(blank())
 // 与服务端保持一致：按换行拆词并去重，标点和词内空格属于词语内容。
+function splitWords(value) {
+  return [...new Set((value || '').split(/\r\n|[\n\r\v\f\u0085\u2028\u2029]/).map(s => s.trim()).filter(Boolean))]
+}
 function validateWords(required) {
   return (_rule, value, done) => {
-    const text = value || ''
-    const words = [...new Set(text.split(/\r\n|[\n\r\v\f\u0085\u2028\u2029]/).map(s => s.trim()).filter(Boolean))]
+    const words = splitWords(value)
     if (required && !words.length) return done(new Error('请填写标题过滤词'))
     if (words.length > 10000 || words.some(s => s.length > 100)) return done(new Error('当前字段最多 10,000 个词，每个词最多 100 字符'))
     if (!required && !words.length && !form.detectPhones && !form.detectQrCodes) return done(new Error('请填写图片文字过滤词，或启用手机号/二维码检测'))
@@ -66,7 +71,15 @@ async function load() {
   loadError.value = false
   try {
     const res = await api.listLibraries({ ...query })
-    if (version === loadVersion) { rows.value = res.rows; total.value = res.total }
+    if (version === loadVersion) {
+      // 标题词和图片文字词分别去重计数，只在加载列表时统计。
+      rows.value = (res.rows || []).map(row => ({
+        ...row,
+        titleWordCount: splitWords(row.titleWords).length,
+        imageWordCount: splitWords(row.imageWords).length
+      }))
+      total.value = res.total
+    }
   } catch { if (version === loadVersion) loadError.value = true }
   finally { if (version === loadVersion) loading.value = false }
 }

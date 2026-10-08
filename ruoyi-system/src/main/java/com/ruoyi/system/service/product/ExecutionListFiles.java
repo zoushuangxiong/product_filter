@@ -78,7 +78,7 @@ public class ExecutionListFiles
     /** 拒绝任意路径，路径只能来自本服务生成的相对文件名。 */
     public Path resolve(String key)
     {
-        if (key == null || !key.matches("[0-9a-f-]{36}\\.(csv|xlsx)")) throw new ServiceException("清单文件路径无效，请检查数据迁移状态");
+        if (key == null || !key.matches("[0-9a-f-]{36}\\.(csv|xlsx|xls)")) throw new ServiceException("清单文件路径无效，请检查数据迁移状态");
         return root.resolve(key);
     }
 

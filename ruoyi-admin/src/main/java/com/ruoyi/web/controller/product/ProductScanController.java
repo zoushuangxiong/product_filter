@@ -34,6 +34,8 @@ public class ProductScanController
     @PostMapping("/tasks")
     public AjaxResult create(@RequestBody ScanModels.Request request)
     {
+        if (request == null) throw new com.ruoyi.common.exception.ServiceException("请选择执行清单");
+        executionListService.checkProductExecutionListDataScope(request.executionListId);
         ScanModels.Job existing = service.executionTask(SecurityUtils.getUserId(), request.executionListId);
         if (existing != null) return AjaxResult.success(existing);
         executionListService.prepareExecution(request);
@@ -49,7 +51,10 @@ public class ProductScanController
     /** 选择执行清单时读取已有检测，不创建新任务。 */
     @GetMapping("/execution-lists/{listId}/task")
     public AjaxResult executionTask(@PathVariable("listId") Long listId)
-    { return AjaxResult.success(service.executionTask(SecurityUtils.getUserId(), listId)); }
+    {
+        executionListService.checkProductExecutionListDataScope(listId);
+        return AjaxResult.success(service.executionTask(SecurityUtils.getUserId(), listId));
+    }
 
     /** 停止或中断后继续原任务，保留已完成结果。 */
     @PostMapping("/tasks/{id}/resume")

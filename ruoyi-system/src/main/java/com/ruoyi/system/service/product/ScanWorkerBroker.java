@@ -36,6 +36,9 @@ public class ScanWorkerBroker {
     private final Semaphore fetchSlots;
     private static class Node { String session; int capacity; long seen; }
     private volatile long lastSeen;
+    private volatile Runnable availableListener = () -> { };
+    /** 仅从离线变为在线时通知额度等待队列，正常心跳不触发扫描。 */
+    public void onAvailable(Runnable listener) { availableListener = listener; }
     private static class Ticket {
         Input input;
         volatile String worker, session;
@@ -137,7 +140,9 @@ public class ScanWorkerBroker {
         if (node != null && now - node.seen < 45_000 && !Objects.equals(node.session, m.session))
             throw new DuplicateWorker();
         if (node == null) { node = new Node(); nodes.put(m.workerId, node); }
+        boolean becameAvailable = now - lastSeen > 30_000;
         node.session = m.session; node.capacity = m.capacity; node.seen = now; lastSeen = now;
+        if (becameAvailable) availableListener.run();
     }
     public synchronized List<WorkerStatus> workers() {
         long now = clock.getAsLong();

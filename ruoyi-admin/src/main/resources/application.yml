@@ -164,7 +164,7 @@ onebound:
   secret: "9375ff95"
 
 app:
-  role: worker
+  role: server
 
 worker:
   server-url: http://8.130.138.170/prod-api/product/scan-worker/

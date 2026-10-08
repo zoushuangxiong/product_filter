@@ -34,7 +34,7 @@ import com.ruoyi.system.service.product.ProductDetectionEngine.Cached;
 /**
  * 云端任务生命周期、权限、额度及结果存储入口；检测算法由 ProductDetectionEngine 共用。
  * 修改任务数据时持有 Job 锁，查询使用已发布快照，停止信号通过 volatile 字段独立传递。
- * 快照原子写入私有目录；重启只恢复结果，不自动重新发起付费查询。
+ * 快照原子写入私有目录；重启恢复结果；仅明确等待跨日额度的任务允许自动继续。
  */
 @Service
 public class ProductScanService
@@ -74,12 +74,15 @@ public class ProductScanService
     }
 
     private final Map<String, Job> jobs = new ConcurrentHashMap<>();
+    // 回传请求线程上的保存故障传递给任务协调线程，停止后仍应显示 FAILED 而非普通取消。
+    private final Map<String, ServiceException> persistenceFailures = new ConcurrentHashMap<>();
     // 保存成功后发布不可变摘要；列表不获取任务锁，不等待大快照写盘。
     private final Map<String, TaskSummary> history = new ConcurrentHashMap<>();
     // 发布后不再修改；查询读取一致快照，不竞争检测线程的写盘锁。
     private final Map<String, ReadSnapshot> snapshots = new ConcurrentHashMap<>();
     private record ReadSnapshot(Job overview, List<List<Picture>> evidence) { }
     private final Path storage;
+    private final ScanTaskStore taskStore;
     private final ScanGateway gateway;
     private final Path usageFile;
     private final int dailyLimit;
@@ -105,6 +108,7 @@ public class ProductScanService
             Thread thread = new Thread(runnable, "product-worker"); thread.setDaemon(true); return thread;
         });
         this.storage = Path.of(storage).toAbsolutePath();
+        this.taskStore = new ScanTaskStore(this.storage);
         this.gateway = new ScanGateway(key, secret);
         this.dailyLimit = dailyLimit > 0 ? dailyLimit : 5000;
         this.usageFile = this.storage.resolve("daily-usage.json");
@@ -121,6 +125,7 @@ public class ProductScanService
                     Job job = JSON.parseObject(Files.readString(file), Job.class);
                     if (job == null || job.id == null || !file.getFileName().toString().equals(job.id + ".json"))
                         throw new IllegalStateException("任务快照格式错误");
+                    taskStore.restore(job);
                     if (active(job))
                     {
                         if (job.segmentStartedAt != null && job.updatedAt != null)
@@ -141,11 +146,86 @@ public class ProductScanService
         catch (Exception e) { throw new IllegalStateException("Cannot restore product scan tasks from " + this.storage, e); }
     }
 
+    /** 与今日额度统一使用北京时间；Clock 可在测试中替换，不需等待真实跨日。 */
+    private java.time.Clock quotaClock = java.time.Clock.system(ZoneId.of("Asia/Shanghai"));
+    private final java.util.concurrent.ScheduledExecutorService quotaScheduler =
+            java.util.concurrent.Executors.newSingleThreadScheduledExecutor(r -> {
+                Thread thread = new Thread(r, "scan-quota-resume"); thread.setDaemon(true); return thread;
+            });
+    private volatile boolean quotaSchedulerStarted;
+
+    /** 启动补查一次，之后只在零点、工作机重连和任务释放队列位置时触发，不轮询额度。 */
+    @org.springframework.context.event.EventListener(org.springframework.boot.context.event.ApplicationReadyEvent.class)
+    public void startQuotaScheduler()
+    {
+        if (quotaSchedulerStarted) return;
+        quotaSchedulerStarted = true;
+        remoteWorker.onAvailable(this::requestQuotaResume);
+        requestQuotaResume();
+        scheduleNextQuotaDay();
+    }
+
+    private LocalDate quotaToday() { return LocalDate.now(quotaClock); }
+
+    long nextQuotaDelayMillis()
+    {
+        return Math.max(1, Duration.between(quotaClock.instant(),
+                quotaToday().plusDays(1).atStartOfDay(quotaClock.getZone()).toInstant()).toMillis());
+    }
+
+    private void scheduleNextQuotaDay()
+    {
+        if (quotaScheduler.isShutdown()) return;
+        quotaScheduler.schedule(() -> {
+            try { resumeQuotaTasks(); }
+            catch (Exception e) { log.error("Daily quota resume failed", e); }
+            finally { scheduleNextQuotaDay(); }
+        }, nextQuotaDelayMillis(), TimeUnit.MILLISECONDS);
+    }
+
+    private void requestQuotaResume()
+    {
+        if (!quotaSchedulerStarted || quotaScheduler.isShutdown()) return;
+        try { quotaScheduler.execute(this::resumeQuotaTasks); }
+        catch (java.util.concurrent.RejectedExecutionException ignored) { }
+    }
+
+    /** 同一用户仍只运行一个任务；队列满或工作机离线时保留等待，事件到来后再尝试。 */
+    synchronized void resumeQuotaTasks()
+    {
+        LocalDate today = quotaToday();
+        for (Job job : jobs.values().stream().sorted(Comparator.comparing(j -> j.createdAt)).toList())
+        {
+            if (!"WAITING_QUOTA".equals(job.state) || job.cancelRequested || job.quotaResumeDate == null
+                    || LocalDate.parse(job.quotaResumeDate).isAfter(today)) continue;
+            synchronized (usageLock)
+            {
+                resetUsageDay();
+                if (usageCount + reservedCount >= dailyLimit) return;
+            }
+            try { resumeTask(job.ownerId, job.id, true); }
+            catch (Exception e) { log.debug("Quota task remains waiting: taskId={}, reason={}", job.id, e.getMessage()); }
+        }
+    }
+
+    /** 必须在 usageLock 内调用；跨日统一重置计数与预占，不由页面刷新单独改变日期。 */
+    private void resetUsageDay()
+    {
+        LocalDate today = quotaToday();
+        if (!today.equals(usageDate)) { usageDate = today; usageCount = 0; reservedCount = 0; saveUsage(); }
+    }
+
+    private void markQuotaWaiting(Job job)
+    {
+        job.error = "DAILY_LIMIT_EXCEEDED";
+        if (job.quotaResumeDate == null) job.quotaResumeDate = quotaToday().plusDays(1).toString();
+    }
+
     private void loadUsage()
     {
         synchronized (usageLock)
         {
-            usageDate = LocalDate.now(ZoneId.of("Asia/Shanghai")); usageCount = 0;
+            usageDate = quotaToday(); usageCount = 0;
             try
             {
                 if (Files.exists(usageFile))
@@ -164,24 +244,26 @@ public class ProductScanService
     }
 
     /** 调用第三方前预占额度；并发任务共享同一把锁，避免超额调用。 */
-    private boolean reserveProviderSlot()
+    private LocalDate reserveProviderSlot()
     {
         synchronized (usageLock)
         {
-            LocalDate today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
-            if (!today.equals(usageDate)) { usageDate = today; usageCount = 0; reservedCount = 0; }
-            if (usageCount + reservedCount >= dailyLimit) return false;
+            resetUsageDay();
+            if (usageCount + reservedCount >= dailyLimit) return null;
             reservedCount++;
             saveUsage();
-            return true;
+            return usageDate;
         }
     }
 
     /** 返回商品信息或明确返回商品已下架时，正式扣除预占额度。 */
-    private void recordProviderSuccess()
+    private void recordProviderSuccess(LocalDate reservedDay)
     {
         synchronized (usageLock)
         {
+            resetUsageDay();
+            // 跨日完成的调用仍属于预占当天，不扣减新一天额度。
+            if (!reservedDay.equals(usageDate)) return;
             reservedCount = Math.max(0, reservedCount - 1);
             usageCount++;
             saveUsage();
@@ -189,9 +271,12 @@ public class ProductScanService
     }
 
     /** 第三方调用失败时释放预占额度。 */
-    private void releaseProviderSlot()
+    private void releaseProviderSlot(LocalDate reservedDay)
     {
-        synchronized (usageLock) { reservedCount = Math.max(0, reservedCount - 1); saveUsage(); }
+        synchronized (usageLock) {
+            resetUsageDay();
+            if (reservedDay.equals(usageDate)) { reservedCount = Math.max(0, reservedCount - 1); saveUsage(); }
+        }
     }
 
     private void saveUsage()
@@ -209,8 +294,7 @@ public class ProductScanService
     {
         synchronized (usageLock)
         {
-            LocalDate today = LocalDate.now(ZoneId.of("Asia/Shanghai"));
-            if (!today.equals(usageDate)) { usageDate = today; usageCount = 0; }
+            resetUsageDay();
             return Map.of("date", usageDate.toString(), "used", usageCount, "limit", dailyLimit);
         }
     }
@@ -224,18 +308,19 @@ public class ProductScanService
     /** 仅缓存未命中时执行；预占额度和成功扣量均限定在真实接口调用范围内。 */
     private TaobaoProductInfo fetchAndCharge(Product product)
     {
-        if (!reserveProviderSlot()) return null;
+        LocalDate reservedDay = reserveProviderSlot();
+        if (reservedDay == null) return null;
         TaobaoProductInfo result;
         try { result = fetchWithRetry(product); }
         catch (RuntimeException e)
         {
             if (e instanceof TaobaoFetchException fetchError
                     && fetchError.getCode() == TaobaoFetchException.Code.ITEM_UNAVAILABLE)
-                recordProviderSuccess();
-            else releaseProviderSlot();
+                recordProviderSuccess(reservedDay);
+            else releaseProviderSlot(reservedDay);
             throw e;
         }
-        recordProviderSuccess();
+        recordProviderSuccess(reservedDay);
         return result;
     }
 
@@ -298,8 +383,8 @@ public class ProductScanService
             Job existing = executionTask(owner, request.executionListId);
             if (existing != null) return existing;
         }
-        if (request == null || request.items == null || request.items.isEmpty() || request.items.size() > 10_000)
-            throw new ServiceException("每次请导入 1 至 10,000 条商品记录（不含表头）");
+        if (request == null || request.items == null || request.items.isEmpty() || request.items.size() > 20_000)
+            throw new ServiceException("每次请导入 1 至 20,000 条商品记录（不含表头）");
         Request rules = JSON.parseObject(JSON.toJSONString(request, JSONWriter.Feature.LargeObject), Request.class);
         validateThreshold(rules.confidenceThreshold);
         if (ScanRules.words(rules.titleWords).isEmpty() || (ScanRules.words(rules.imageWords).isEmpty() && !rules.detectPhones && !rules.detectQrCodes))
@@ -358,6 +443,11 @@ public class ProductScanService
     /** 继续未执行完的商品，沿用原始清单快照和规则，已完成及获取失败项不重复执行。 */
     public synchronized Job resume(long owner, String id)
     {
+        return resumeTask(owner, id, false);
+    }
+
+    private Job resumeTask(long owner, String id, boolean automatic)
+    {
         Job job = owned(owner, id);
         synchronized (job)
         {
@@ -369,18 +459,19 @@ public class ProductScanService
                 throw new ServiceException("你已有进行中的任务，请等待完成或先停止");
             remoteWorker.checkAvailable();
             gateway.checkReady(!remoteWorker.enabled());
-            captureWhitelist(job);
-            String oldState = job.state, oldError = job.error;
+            if (!automatic) captureWhitelist(job);
+            String oldState = job.state, oldError = job.error, oldResumeDate = job.quotaResumeDate;
             boolean oldCancel = job.cancelRequested;
             List<String> oldIds = job.retryItemIds;
             String oldOnly = job.retryOnlyItemId;
             job.state = "QUEUED"; job.error = null; job.cancelRequested = false;
             job.retryItemIds = new ArrayList<>(); job.retryOnlyItemId = null;
+            job.quotaResumeDate = null;
             try { save(job); executor.execute(() -> run(job)); }
             catch (RuntimeException e)
             {
                 job.state = oldState; job.error = oldError; job.cancelRequested = oldCancel;
-                job.retryItemIds = oldIds; job.retryOnlyItemId = oldOnly; save(job);
+                job.retryItemIds = oldIds; job.retryOnlyItemId = oldOnly; job.quotaResumeDate = oldResumeDate; save(job);
                 throw new ServiceException("任务暂时无法入队，请稍后继续检测");
             }
             return response(job);
@@ -518,6 +609,7 @@ public class ProductScanService
         view.segmentStartedAt = source.segmentStartedAt;
         view.resumable = source.resumable || source.products.stream().anyMatch(p -> !Set.of("DONE", "FAILED").contains(p.state));
         view.cancelRequested = owned(owner, id).cancelRequested; view.error = source.error;
+        view.quotaResumeDate = source.quotaResumeDate;
         view.ruleVersion = source.ruleVersion;
         // 原始导入内容和完整词库仍保存在任务快照中，分页展示只需平台和阈值。
         view.rules = new Request();
@@ -570,6 +662,7 @@ public class ProductScanService
         view.segmentStartedAt = source.segmentStartedAt;
         view.resumable = !source.recheckItemIds.isEmpty() || source.products.stream().anyMatch(p -> !Set.of("DONE", "FAILED").contains(p.state));
         view.cancelRequested = source.cancelRequested; view.error = source.error;
+        view.quotaResumeDate = source.quotaResumeDate;
         view.ruleVersion = source.ruleVersion;
         view.rules = new Request();
         view.rules.wordLibraryId = source.recheckRules == null ? source.rules.wordLibraryId : source.recheckRules.wordLibraryId;
@@ -624,6 +717,12 @@ public class ProductScanService
         Job job = owned(owner, id);
         // 控制信号不能等待整单写盘锁；最终状态由运行线程统一落盘。
         if (active(job)) job.cancelRequested = true;
+        if (!active(job)) synchronized (this) { synchronized (job) {
+            if ("WAITING_QUOTA".equals(job.state)) {
+                job.cancelRequested = true; job.quotaResumeDate = null;
+                job.state = "CANCELLED"; save(job);
+            } else if (active(job)) job.cancelRequested = true;
+        } }
         Job view = response(snapshot(owner, id).overview());
         view.cancelRequested = job.cancelRequested;
         return view;
@@ -911,6 +1010,7 @@ public class ProductScanService
     /** 派发本轮待处理商品并等待全部退出后统一收尾，避免停止时提前允许另一轮检测。 */
     private void run(Job job)
     {
+        persistenceFailures.remove(job.id);
         long segmentStarted = System.currentTimeMillis();
         long previousDuration = job.durationMillis;
         try
@@ -986,9 +1086,14 @@ public class ProductScanService
             }
             synchronized (job)
             {
+                ServiceException storageFailure = persistenceFailures.remove(job.id);
+                if (storageFailure != null) throw storageFailure;
                 job.retryOnlyItemId = null;
                 job.retryItemIds = new ArrayList<>();
-                job.state = stopping(job) ? "CANCELLED"
+                boolean waitingQuota = !stopping(job) && "DAILY_LIMIT_EXCEEDED".equals(job.error)
+                        && job.products.stream().anyMatch(p -> !Set.of("DONE", "FAILED").contains(p.state));
+                if (waitingQuota) markQuotaWaiting(job); else job.quotaResumeDate = null;
+                job.state = stopping(job) ? "CANCELLED" : waitingQuota ? "WAITING_QUOTA"
                         : remoteWorker.enabled() && job.products.stream().anyMatch(p -> "INTERRUPTED".equals(p.state))
                             ? "INTERRUPTED" : "COMPLETED";
                 job.completedAt = Instant.now().toString();
@@ -997,16 +1102,31 @@ public class ProductScanService
                 save(job);
             }
         }
-        catch (Exception e)
+        catch (Exception | OutOfMemoryError e)
         {
             synchronized (job)
             {
-                job.state = "FAILED"; job.error = "任务处理或保存失败，请检查服务端存储";
+                log.error("Product scan execution failed: taskId={}", job.id, e);
+                job.cancelRequested = true;
+                job.quotaResumeDate = null;
+                job.state = "FAILED"; job.error = "任务处理或保存失败，部分结果可能未保存，请检查服务端日志";
                 job.completedAt = Instant.now().toString();
                 if (job.startedAt != null) job.durationMillis = previousDuration + Math.max(0, System.currentTimeMillis() - segmentStarted);
-                save(job);
+                for (Product product : job.products)
+                {
+                    if (!Set.of("DONE", "FAILED").contains(product.state))
+                    { product.state = "INTERRUPTED"; product.incomplete = true; }
+                }
+                // 即使磁盘持续不可写，也必须发布失败状态，不能继续展示旧的 RUNNING 快照。
+                // 此处发布仅用于页面提示，不代表持久化成功，也不会向工作机确认结果。
+                history.put(job.id, summary(job));
+                publish(job);
+                try { save(job); }
+                catch (ServiceException failure)
+                { log.error("Product scan failure state could not be persisted: taskId={}", job.id, failure); }
             }
         }
+        finally { persistenceFailures.remove(job.id); requestQuotaResume(); }
     }
 
     /**
@@ -1057,11 +1177,11 @@ public class ProductScanService
                                 // Aggregate frequent multi-machine progress; final results are ALWAYS durably saved before ACK.
                                 if (Set.of("DONE", "FAILED", "INTERRUPTED").contains(p.state)
                                         || job.updatedAt == null || Duration.between(Instant.parse(job.updatedAt), Instant.now()).toMillis() >= 5000)
-                                    save(job);
+                                    saveProduct(job, p);
                             }
                         });
                 if ("DAILY_LIMIT_EXCEEDED".equals(p.error)) {
-                    synchronized (job) { job.error = p.error; save(job); }
+                    synchronized (job) { markQuotaWaiting(job); saveProduct(job, p); }
                     return false;
                 }
             }
@@ -1070,18 +1190,18 @@ public class ProductScanService
                 if (!ProductDetectionEngine.prepareCompiled(p, titleWords, whitelist,
                         importedTitles.getOrDefault(p.itemId, List.of()), rechecking, retrying,
                         () -> productInfoCacheService.getOrFetch(p.platform, p.itemId, () -> fetchAndCharge(p)),
-                        job, () -> save(job), () -> job.error = "DAILY_LIMIT_EXCEEDED")) return false;
+                        job, () -> saveProduct(job, p), () -> markQuotaWaiting(job))) return false;
                 if ("DONE".equals(p.state) && !p.titleHits.isEmpty()) return true;
                 ProductDetectionEngine.executePrepared(p, activeRules, threshold(job), imageWords,
                         whitelist, cache, storage.resolve("assets"), gateway, job,
-                        () -> stopping(job), () -> save(job));
+                        () -> stopping(job), () -> saveProduct(job, p));
             }
         }
         catch (ScanWorkerBroker.Unavailable e)
         {
             synchronized (job) {
                 p.state = "INTERRUPTED"; p.incomplete = true; p.error = e.getMessage();
-                job.error = e.getMessage(); save(job);
+                job.error = e.getMessage(); saveProduct(job, p);
             }
             return false;
         }
@@ -1096,11 +1216,14 @@ public class ProductScanService
         }
         catch (Exception e)
         {
+            // 存储故障交给任务收尾，不能误标成第三方商品获取失败并继续领取商品。
+            ServiceException storageFailure = persistenceFailures.get(job.id);
+            if (storageFailure != null) throw storageFailure;
             synchronized (job)
             {
                 p.state = stopping(job) ? "CANCELLED" : "FAILED"; p.incomplete = true;
                 p.error = e instanceof TaobaoFetchException ? ((TaobaoFetchException) e).getCode().name() : "商品获取或任务处理失败";
-                if (!stopping(job)) save(job);
+                if (!stopping(job)) saveProduct(job, p);
             }
         }
         finally
@@ -1108,7 +1231,7 @@ public class ProductScanService
             if (rechecking) synchronized (job)
             {
                 if (Set.of("DONE", "FAILED").contains(p.state))
-                { job.recheckItemIds.remove(p.itemId); if (!stopping(job)) save(job); }
+                { job.recheckItemIds.remove(p.itemId); if (!stopping(job)) saveProduct(job, p); }
             }
         }
         return true;
@@ -1124,6 +1247,27 @@ public class ProductScanService
     private static boolean active(Job job) { return "QUEUED".equals(job.state) || "RUNNING".equals(job.state); }
     private static boolean stopping(Job job) { return job.cancelRequested || Thread.currentThread().isInterrupted(); }
     private static Job copy(Job job) { return JSON.parseObject(JSON.toJSONString(job, JSONWriter.Feature.LargeObject), Job.class); }
+    /** 检测中仅持久化变动商品，完整任务快照在开始、结束和规则变更时保存。 */
+    private void saveProduct(Job job, Product product)
+    {
+        try
+        {
+            job.updatedAt = Instant.now().toString();
+            taskStore.writeProduct(job, product);
+            history.put(job.id, summary(job));
+            publish(job);
+        }
+        catch (Exception | OutOfMemoryError e)
+        {
+            job.cancelRequested = true;
+            ServiceException failure = new ServiceException("商品结果保存失败，请检查服务端日志");
+            failure.initCause(e);
+            persistenceFailures.putIfAbsent(job.id, failure);
+            log.error("Product result save failed: taskId={}, itemId={}", job.id, product.itemId, e);
+            throw failure;
+        }
+    }
+
     /**
      * 在 Job 锁内先写临时文件，再原子替换，成功后发布只读查询快照。
      * 当前仍是整单持久化，含原始 CSV 和 OCR 坐标；不可用“先确认、后保存”降低回传等待，
@@ -1132,6 +1276,7 @@ public class ProductScanService
     private void save(Job job)
     {
         job.updatedAt = Instant.now().toString();
+        job.storeRevision++;
         Path temp = null;
         String stage = "create temporary file";
         try
@@ -1139,9 +1284,11 @@ public class ProductScanService
             temp = Files.createTempFile(storage, "scan-", ".tmp");
             stage = "serialize and write task";
             // 大清单含完整 CSV/OCR，可能超过 Fastjson 默认 64M 数组限制。
-            // 直接写 UTF-8，避免先构造完整 JSON String 再转码；仍保留临时文件原子替换。
-            try (var output = Files.newOutputStream(temp)) {
+            // FileOutputStream 不经过 NIO 的线程本地直接缓冲区缓存，避免每个请求线程
+            // 长期保留一份整单大小的堆外缓冲区；JSON 序列化仍使用堆内 UTF-8 字节数组。
+            try (var output = new java.io.FileOutputStream(temp.toFile())) {
                 JSON.writeTo(output, job, JSONWriter.Feature.LargeObject);
+                output.getFD().sync();
             }
             stage = "replace task snapshot";
             Files.move(temp, storage.resolve(job.id + ".json"), StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
@@ -1149,10 +1296,13 @@ public class ProductScanService
             history.put(job.id, summary(job));
             publish(job);
         }
-        catch (Exception e) {
+        catch (Exception | OutOfMemoryError e) {
+            // 先停止继续派发；已派发商品退出后由 run 统一发布 FAILED，避免提前允许重复执行。
+            job.cancelRequested = true;
             log.error("Product scan save failed: stage={}, directory={}, taskId={}", stage, storage, job.id, e);
             ServiceException failure = new ServiceException("任务保存失败，请查看服务器日志中的具体原因");
             failure.initCause(e);
+            persistenceFailures.putIfAbsent(job.id, failure);
             throw failure;
         }
         finally { if (temp != null) try { Files.deleteIfExists(temp); } catch (Exception ignored) { } }
@@ -1161,6 +1311,8 @@ public class ProductScanService
     public void close()
     {
         for (Job job : jobs.values()) job.cancelRequested = true;
+        quotaSchedulerStarted = false;
+        quotaScheduler.shutdownNow();
         executor.shutdown();
         productExecutor.shutdown();
     }

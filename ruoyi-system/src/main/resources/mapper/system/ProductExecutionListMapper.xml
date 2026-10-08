@@ -6,6 +6,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <resultMap type="ProductExecutionList" id="ProductExecutionListResult">
         <result property="id"    column="id"    />
+        <result property="userId" column="user_id" />
         <result property="platform"    column="platform"    />
         <result property="fileName"    column="file_name"    />
         <result property="productCount"    column="product_count"    />
@@ -26,22 +27,26 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
 
     <!-- 列表只查询元信息，避免分页时读取整份表格。 -->
     <sql id="selectProductExecutionListVo">
-        select e.id, e.platform, e.file_name, e.file_path, e.product_count, e.record_count, e.remark, e.create_by, e.create_time, e.update_by, e.update_time, f.filtered_record_count, f.filtered_product_count, f.filtered_time, f.filter_version
+        select e.id, e.user_id, e.platform, e.file_name, e.file_path, e.product_count, e.record_count, e.remark, e.create_by, e.create_time, e.update_by, e.update_time, f.filtered_record_count, f.filtered_product_count, f.filtered_time, f.filter_version
         from product_execution_list e
+        left join sys_user u on u.user_id = e.user_id
         left join product_execution_list_filter f on f.list_id = e.id and f.owner_id = #{params.ownerId}
     </sql>
 
     <select id="selectProductExecutionListList" parameterType="ProductExecutionList" resultMap="ProductExecutionListResult">
         <include refid="selectProductExecutionListVo"/>
         <where>
+            <if test="id != null"> and e.id = #{id}</if>
             <if test="fileName != null and fileName != ''"> and e.file_name like concat('%', #{fileName}, '%')</if>
             <if test="platform != null and platform != ''"> and e.platform = #{platform}</if>
+            <!-- 仅使用 DataScope 切面生成并清理过的权限条件。 -->
+            ${params.dataScope}
         </where>
         order by e.id desc
     </select>
 
     <select id="selectProductExecutionListById" parameterType="Long" resultMap="ProductExecutionListResult">
-        select id, platform, file_name, product_count, record_count, file_path, remark, create_by, create_time, update_by, update_time
+        select id, user_id, platform, file_name, product_count, record_count, file_path, remark, create_by, create_time, update_by, update_time
         from product_execution_list where id = #{id}
     </select>
 
@@ -52,6 +57,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     <insert id="insertProductExecutionList" parameterType="ProductExecutionList" useGeneratedKeys="true" keyProperty="id">
         insert into product_execution_list
         <trim prefix="(" suffix=")" suffixOverrides=",">
+            user_id,
             <if test="platform != null">platform,</if>
             <if test="fileName != null">file_name,</if>
             <if test="productCount != null">product_count,</if>
@@ -64,6 +70,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
             <if test="updateTime != null">update_time,</if>
         </trim>
         <trim prefix="values (" suffix=")" suffixOverrides=",">
+            #{userId},
             <if test="platform != null">#{platform},</if>
             <if test="fileName != null">#{fileName},</if>
             <if test="productCount != null">#{productCount},</if>
@@ -99,7 +106,7 @@ PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
     </delete>
     <!-- 串行化同一清单的过滤、读取和删除，防止文件在创建任务时被替换或删除。 -->
     <select id="selectProductExecutionListForUpdate" parameterType="Long" resultMap="ProductExecutionListResult">
-        select id, platform, file_name, file_path, product_count, record_count, remark
+        select id, user_id, platform, file_name, file_path, product_count, record_count, remark
         from product_execution_list where id = #{id} for update
     </select>
 

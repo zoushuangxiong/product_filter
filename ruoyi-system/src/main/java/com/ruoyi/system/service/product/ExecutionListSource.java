@@ -28,7 +28,7 @@ import org.xml.sax.InputSource;
 import com.ruoyi.common.exception.ServiceException;
 
 /**
- * 清单文件读取与过滤：CSV 按字符流读取，Excel 按行解析首张工作表，不创建整本工作簿
+ * 清单文件读取与过滤：CSV 按字符流读取，XLSX 流式解析，XLS 使用 HSSF 读取首张工作表
  *
  * @author ruoyi
  * @date 2026-09-23
@@ -61,7 +61,9 @@ public final class ExecutionListSource
             if (!Files.isRegularFile(path)) throw new ServiceException("清单文件不存在，请检查服务器文件目录");
             if (Files.size(path) > MAX_BYTES) throw new ServiceException("文件不能超过20 MB");
             List<List<String>> rows;
-            if (path.toString().endsWith(".xlsx")) rows = excel(path);
+            String filename = path.toString().toLowerCase(java.util.Locale.ROOT);
+            if (filename.endsWith(".xlsx")) rows = excel(path);
+            else if (filename.endsWith(".xls")) rows = legacyExcel(path);
             else
             {
                 try { rows = csv(path, StandardCharsets.UTF_8); }
@@ -137,7 +139,7 @@ public final class ExecutionListSource
         return rows;
     }
 
-    /** Excel SAX 解析，最多保留一万条记录，并限制解压后的文本量。 */
+    /** Excel SAX 解析，最多保留两万条记录，并限制解压后的文本量。 */
     private static List<List<String>> excel(Path path) throws Exception
     {
         List<List<String>> rows = new ArrayList<>();
@@ -193,11 +195,65 @@ public final class ExecutionListSource
         return rows;
     }
 
+    /**
+     * 读取旧版二进制 XLS 首张工作表，沿用记录数、列数、文本量及商品ID精度限制。
+     * 公式只读取文件中已有的缓存结果，不执行公式或访问外部链接。
+     *
+     * @param path 原始 XLS 文件
+     * @return 保留空单元格位置的表格行
+     */
+    private static List<List<String>> legacyExcel(Path path) throws Exception
+    {
+        List<List<String>> rows = new ArrayList<>();
+        try (var file = new org.apache.poi.poifs.filesystem.POIFSFileSystem(path.toFile(), true);
+             var workbook = new org.apache.poi.hssf.usermodel.HSSFWorkbook(file))
+        {
+            if (workbook.getNumberOfSheets() == 0) throw new ServiceException("Excel 没有工作表");
+            DataFormatter formatter = new DataFormatter();
+            formatter.setUseCachedValuesForFormulaCells(true);
+            int itemColumn = -1;
+            long characters = 0;
+            for (var sheetRow : workbook.getSheetAt(0))
+            {
+                if (sheetRow.getLastCellNum() > 256) throw new ServiceException("表格最多支持256列");
+                List<String> row = new ArrayList<>();
+                for (int column = 0; column < sheetRow.getLastCellNum(); column++)
+                {
+                    var cell = sheetRow.getCell(column);
+                    String value = formatter.formatCellValue(cell);
+                    if (cell != null)
+                    {
+                        var type = cell.getCellType() == org.apache.poi.ss.usermodel.CellType.FORMULA
+                                ? cell.getCachedFormulaResultType() : cell.getCellType();
+                        if (type == org.apache.poi.ss.usermodel.CellType.NUMERIC)
+                        {
+                            double number = cell.getNumericCellValue();
+                            if (column == itemColumn && (number >= 1e15 || number != Math.rint(number)))
+                                throw new ServiceException("Excel 数字商品ID过长或不是整数，请用文本格式填写完整ID");
+                            String format = cell.getCellStyle().getDataFormatString();
+                            if ("General".equalsIgnoreCase(format) || (format != null
+                                    && format.toUpperCase(java.util.Locale.ROOT).contains("E+")))
+                                value = BigDecimal.valueOf(number).stripTrailingZeros().toPlainString();
+                        }
+                    }
+                    characters += value.length();
+                    if (characters > MAX_BYTES) throw new ServiceException("Excel 表格内容过大");
+                    row.add(value);
+                }
+                if (rows.isEmpty())
+                    for (int i = 0; i < row.size(); i++)
+                        if (HEADERS.contains(row.get(i).trim())) { itemColumn = i; break; }
+                addRow(rows, row);
+            }
+        }
+        return rows;
+    }
+
     /** 空行不计数，限制有效记录，避免稀疏工作表占用无界内存。 */
     private static void addRow(List<List<String>> rows, List<String> row)
     {
         if (row.stream().allMatch(String::isBlank)) return;
-        if (rows.size() >= 10001) throw new ServiceException("每份清单最多10,000条商品记录");
+        if (rows.size() >= 20001) throw new ServiceException("每份清单最多20,000条商品记录");
         rows.add(List.copyOf(row));
     }
 

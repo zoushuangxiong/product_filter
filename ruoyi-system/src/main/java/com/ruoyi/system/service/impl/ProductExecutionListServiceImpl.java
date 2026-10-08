@@ -13,6 +13,8 @@ import org.springframework.transaction.annotation.Transactional;
 import com.ruoyi.common.exception.ServiceException;
 import com.ruoyi.common.utils.DateUtils;
 import com.ruoyi.common.utils.SecurityUtils;
+import com.ruoyi.common.annotation.DataScope;
+import com.ruoyi.common.utils.spring.SpringUtils;
 import com.ruoyi.system.domain.ProductExecutionList;
 import com.ruoyi.system.mapper.ProductExecutionListMapper;
 import com.ruoyi.system.service.IProductExecutionListService;
@@ -45,6 +47,7 @@ public class ProductExecutionListServiceImpl implements IProductExecutionListSer
     @Override
     public ProductExecutionList selectProductExecutionListById(Long id)
     {
+        checkProductExecutionListDataScope(id);
         ProductExecutionList result = productExecutionListMapper.selectProductExecutionListById(id);
         if (result != null) attachFilter(result, currentFilter(id));
         return result;
@@ -56,9 +59,10 @@ public class ProductExecutionListServiceImpl implements IProductExecutionListSer
      * @return 执行清单集合
      */
     @Override
+    @DataScope(deptAlias = "u", userAlias = "e")
     public List<ProductExecutionList> selectProductExecutionListList(ProductExecutionList productExecutionList)
     {
-        // 清单全局共享，过滤结果按当前账号关联，不能使用客户端提供的用户ID。
+        // 清单按创建人的角色数据范围过滤；过滤快照仍按当前账号关联。
         productExecutionList.getParams().put("ownerId", SecurityUtils.getUserId());
         return productExecutionListMapper.selectProductExecutionListList(productExecutionList);
     }
@@ -73,7 +77,8 @@ public class ProductExecutionListServiceImpl implements IProductExecutionListSer
     public int insertProductExecutionList(ProductExecutionList productExecutionList)
     {
         validate(productExecutionList);
-        String extension = productExecutionList.getFileName().toLowerCase(Locale.ROOT).endsWith(".xlsx") ? ".xlsx" : ".csv";
+        String fileName = productExecutionList.getFileName();
+        String extension = fileName.substring(fileName.lastIndexOf('.')).toLowerCase(Locale.ROOT);
         String path = executionListFiles.save(productExecutionList.getFile(), extension);
         try
         {
@@ -82,6 +87,8 @@ public class ProductExecutionListServiceImpl implements IProductExecutionListSer
             productExecutionList.setFilePath(path);
             productExecutionList.setRecordCount(source.recordCount());
             productExecutionList.setProductCount(source.productCount());
+            productExecutionList.setUserId(SecurityUtils.getUserId());
+            productExecutionList.setCreateBy(SecurityUtils.getUsername());
             productExecutionList.setCreateTime(DateUtils.getNowDate());
             return productExecutionListMapper.insertProductExecutionList(productExecutionList);
         }
@@ -101,6 +108,7 @@ public class ProductExecutionListServiceImpl implements IProductExecutionListSer
     @Override
     public int updateProductExecutionList(ProductExecutionList productExecutionList)
     {
+        checkProductExecutionListDataScope(productExecutionList.getId());
         if (productExecutionListMapper.selectProductExecutionListById(productExecutionList.getId()) == null)
             throw new ServiceException("执行清单不存在或已删除");
         validateRemark(productExecutionList.getRemark());
@@ -122,6 +130,8 @@ public class ProductExecutionListServiceImpl implements IProductExecutionListSer
     public int deleteProductExecutionListByIds(Long[] ids)
     {
         if (ids == null || ids.length == 0) throw new ServiceException("请选择需要删除的执行清单");
+        // 先校验整批权限，避免越权请求触发部分删除或文件清理。
+        for (Long id : ids) checkProductExecutionListDataScope(id);
         int count = 0;
         // 多清单按固定顺序加锁，避免同时批量删除时死锁。
         for (Long id : Arrays.stream(ids).distinct().sorted().toList())
@@ -215,7 +225,7 @@ public class ProductExecutionListServiceImpl implements IProductExecutionListSer
                 || name.chars().anyMatch(Character::isISOControl)) throw new ServiceException("请上传有效文件，文件名不能超过255个字符");
         name = Normalizer.normalize(name.trim(), Normalizer.Form.NFC);
         String lower = name.toLowerCase(Locale.ROOT);
-        if (!lower.endsWith(".csv") && !lower.endsWith(".xlsx")) throw new ServiceException("只支持 CSV 或 Excel（.xlsx）文件");
+        if (!lower.endsWith(".csv") && !lower.endsWith(".xlsx") && !lower.endsWith(".xls")) throw new ServiceException("只支持 CSV 或 Excel（.xlsx、.xls）文件");
         if (productExecutionListMapper.selectProductExecutionListIdByFileName(name) != null)
             throw new ServiceException("已上传同名文件，请勿重复上传");
         item.setFileName(name);
@@ -227,9 +237,26 @@ public class ProductExecutionListServiceImpl implements IProductExecutionListSer
         if (remark != null && remark.length() > 500) throw new ServiceException("备注不能超过500个字符");
     }
 
+    /**
+     * 校验单条清单的数据范围，供详情、写操作和检测入口复用。
+     * 通过 Spring 代理查询，确保内部调用也执行若依 DataScope 切面。
+     *
+     * @param id 清单主键
+     */
+    @Override
+    public void checkProductExecutionListDataScope(Long id)
+    {
+        if (id == null) throw new ServiceException("请选择执行清单");
+        ProductExecutionList query = new ProductExecutionList();
+        query.setId(id);
+        if (SpringUtils.getAopProxy(this).selectProductExecutionListList(query).isEmpty())
+            throw new ServiceException("执行清单不存在或无权访问");
+    }
+
     /** 查询并锁定清单；文件操作期间禁止删除或替换过滤结果。 */
     private ProductExecutionList locked(Long id)
     {
+        checkProductExecutionListDataScope(id);
         ProductExecutionList item = productExecutionListMapper.selectProductExecutionListForUpdate(id);
         if (item == null) throw new ServiceException("执行清单不存在或已删除");
         return item;

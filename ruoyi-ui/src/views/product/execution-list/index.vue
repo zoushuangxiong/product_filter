@@ -60,12 +60,12 @@
         </el-form-item>
         <el-form-item label="清单文件" prop="fileName">
           <div class="upload-area">
-            <input v-if="!form.id" ref="fileInput" type="file" accept=".csv,.xlsx" hidden @change="handleFileChange" />
+            <input v-if="!form.id" ref="fileInput" type="file" accept=".csv,.xlsx,.xls" hidden @change="handleFileChange" />
             <el-button v-if="!form.id" type="primary" plain icon="Upload" :loading="reading" @click="fileInput.click()">{{ form.fileName ? '替换文件' : '选择文件' }}</el-button>
             <el-button v-if="!form.id" link type="primary" @click="downloadTemplate">下载 CSV 模板</el-button>
             <div v-if="form.fileName" class="file-name">{{ form.fileName }}</div>
             <div v-if="form.recordCount != null" class="file-count">文件记录数：{{ form.recordCount }} 条<span v-if="form.id">，商品数量：{{ form.productCount }} 个</span></div>
-            <p v-if="!form.id" class="upload-hint">支持 CSV、Excel（.xlsx），最多 10,000 条、不超过 20 MB。必须有表头，包含“商品链接”或“商品ID”列。Excel 读取第一张工作表。</p>
+            <p v-if="!form.id" class="upload-hint">支持 CSV、Excel（.xlsx、.xls），最多 20,000 条、不超过 20 MB。必须有表头，包含“商品链接”或“商品ID”列。Excel 读取第一张工作表。</p>
             <p v-else class="upload-hint">仅允许修改备注。</p>
           </div>
         </el-form-item>
@@ -177,7 +177,7 @@ async function handleFileChange(event) {
   if (!file) return
   reading.value = true
   try {
-    if (!/\.(csv|xlsx)$/i.test(file.name)) throw Error('只支持 CSV 或 Excel（.xlsx）文件')
+    if (!/\.(csv|xlsx|xls)$/i.test(file.name)) throw Error('只支持 CSV 或 Excel（.xlsx、.xls）文件')
     if (file.size > 20 * 1024 * 1024) throw Error('文件不能超过20 MB')
     selectedFile.value = file
     form.value.fileName = file.name

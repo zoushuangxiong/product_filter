@@ -21,6 +21,9 @@ public class ProductExecutionList extends BaseEntity
     /** 清单主键 */
     private Long id;
 
+    /** 创建用户ID，用于角色数据权限，由服务端写入 */
+    private Long userId;
+
     /** 商品平台：taobao 或 1688 */
     private String platform;
 
@@ -61,6 +64,16 @@ public class ProductExecutionList extends BaseEntity
     /** 新增时上传的原始文件，不写入数据库 */
     @JsonIgnore
     private MultipartFile file;
+
+    public void setUserId(Long userId)
+    {
+        this.userId = userId;
+    }
+
+    public Long getUserId()
+    {
+        return userId;
+    }
 
     public void setId(Long id)
     {
@@ -197,6 +210,7 @@ public class ProductExecutionList extends BaseEntity
     {
         return new ToStringBuilder(this, ToStringStyle.MULTI_LINE_STYLE)
             .append("id", getId())
+            .append("userId", getUserId())
             .append("platform", getPlatform())
             .append("fileName", getFileName())
             .append("recordCount", getRecordCount())

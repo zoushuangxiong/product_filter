@@ -49,6 +49,10 @@ public final class ScanModels
     {
         public String id;
         public long ownerId;
+        /** 持久化版本号，合并单商品增量时防止旧记录覆盖新快照。 */
+        public long storeRevision;
+        /** 仅额度不足暂停时设置，手动停止清空。 */
+        public String quotaResumeDate;
         public String createdAt;
         public String updatedAt;
         /** 实际开始处理时间，不包含排队时间。 */
